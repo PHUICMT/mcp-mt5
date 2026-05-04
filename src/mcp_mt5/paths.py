@@ -111,6 +111,26 @@ def find_terminal_for_install(install: Path) -> Optional[tuple[str, Path]]:
     return None
 
 
+def list_terminal_origins() -> list[dict]:
+    """Enumerate all MetaTrader terminal data folders with their origin install path."""
+    appdata = os.environ.get("APPDATA")
+    if not appdata:
+        return []
+    base = Path(appdata) / "MetaQuotes" / "Terminal"
+    if not base.exists():
+        return []
+    out: list[dict] = []
+    for d in base.iterdir():
+        if not d.is_dir() or len(d.name) != 32:
+            continue
+        out.append({
+            "hash": d.name,
+            "origin": _read_origin(d),
+            "data_dir": str(d),
+        })
+    return out
+
+
 def detect_layout(
     install: Optional[str] = None,
     data: Optional[str] = None,

@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.0 — 2026-05-04
+
+Roadmap completion: cross-broker selection, smoke harness, log subscription, AST refactor.
+
+### New tools
+- `select_terminal` — switch the active MetaTrader data folder mid-session by origin path, hash, or install dir
+- `smoke_test` — compile + deploy + run a 1-day headless backtest + scan the journal for runtime errors (compile pass ≠ runtime pass)
+- `extract_function` — brace-aware refactor that extracts a contiguous block into a new helper, either inline or into an external `.mqh`
+
+### New MCP resources
+- `mt5://livelog` — latest tail of `MQL5/Files/LiveLog.txt`
+- `mt5://journal` — today's daily MT5 journal log
+- `mt5://tester-log` — most recent Strategy Tester journal
+
+Resources let MCP clients re-read on demand for log subscription / polling without a dedicated tool call.
+
+### Internal
+- New modules: `smoke.py`, `ast_refactor.py`
+- `paths.list_terminal_origins()` helper
+- Test count: 38 → 46
+
 ## 0.3.0 — 2026-05-04
 
 Full dev-loop expansion: 18 new tools across 7 modules.

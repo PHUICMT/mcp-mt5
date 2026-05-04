@@ -27,14 +27,15 @@ For runtime trading, pair this with a live-trading MCP — they target different
 
 ## Tools
 
-The server exposes 29 tools across eight categories.
+The server exposes 32 tools and 3 MCP resources across nine categories.
 
-### 🔍 Discovery
+### 🔍 Discovery & terminal selection
 
 | Tool | Description |
 |------|-------------|
 | `env_info` | Dump resolved paths, terminal hash, edition, and missing-component issues |
 | `list_terminals` | Enumerate every MT4/5 terminal data folder under `%APPDATA%\MetaQuotes\Terminal` along with each `origin.txt` install path |
+| `select_terminal` | Switch the active terminal data folder mid-session by origin path, hash, or install dir — handy for testing across multiple brokers |
 
 ### 🔨 Build & deploy
 
@@ -43,6 +44,7 @@ The server exposes 29 tools across eight categories.
 | `compile` | Invoke MetaEditor CLI on a `.mq4`/`.mq5`/`.mqh` source. Returns structured `errors[]`/`warnings[]` (file, line, column, error code, message) plus log excerpt |
 | `compile_and_deploy` | Compile, then copy the resulting `.ex4`/`.ex5` into the terminal's `Experts/` folder in one call |
 | `syntax_check` | Same as `compile` but uses MetaEditor's `/s` syntax-only mode for faster feedback |
+| `smoke_test` | Compile + deploy + run a 1-day headless backtest + scan the journal for runtime errors. Catches problems that pass `compile` but fail at runtime |
 | `deploy_ea` | Copy a compiled binary into `Experts/` (with optional rename) |
 | `install_include` | Copy a `.mqh` header into the terminal `Include/` folder — handy for libraries like `LiveLog.mqh` |
 | `list_experts` | Enumerate `Experts/` recursively with size and modification time |
@@ -79,6 +81,7 @@ The server exposes 29 tools across eight categories.
 | Tool | Description |
 |------|-------------|
 | `rename_symbol` | Whole-word rename across all MQL files in a tree, with `dry_run` preview |
+| `extract_function` | Brace-aware extraction of a contiguous block into a new helper function — inline or into an external `.mqh` |
 
 ### 📊 Strategy Tester
 
@@ -100,6 +103,16 @@ The server exposes 29 tools across eight categories.
 | `tail_log` | Tail the last *N* lines of either `Files/LiveLog.txt`, the daily `Logs/YYYYMMDD.log`, or the most recent tester log. Optional structured parse into `{ts, source, message}` records |
 | `snapshot_sources` | Freeze a copy of source files into a timestamped folder with a `manifest.json` |
 | `list_snapshots` | Enumerate previously captured snapshots |
+
+### 📡 MCP resources
+
+Live, re-readable URIs that an MCP client can poll instead of calling a tool repeatedly.
+
+| URI | Description |
+|-----|-------------|
+| `mt5://livelog` | Latest tail of `MQL5/Files/LiveLog.txt` |
+| `mt5://journal` | Today's daily MT5 journal log |
+| `mt5://tester-log` | Most recent Strategy Tester journal |
 
 ---
 
@@ -262,10 +275,11 @@ mcp-mt5/
 
 ## Roadmap
 
-- Cross-broker terminal selection helper (`select_terminal` by origin path or hash)
-- Long-running log subscription via MCP resources
-- Smoke-test runner that boots a 1-day Strategy Tester pass and asserts no runtime errors
-- AST-based `extract_function` refactor (currently regex-based rename only)
+All v0.3.x roadmap items shipped in v0.4.0. Future ideas:
+
+- Real tree-sitter MQL grammar for `extract_function` (current implementation is brace-counting + regex)
+- WebSocket transport for long-lived sessions (currently stdio only)
+- Linux/Wine port for non-Windows agents
 
 ---
 

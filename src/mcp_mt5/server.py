@@ -11,7 +11,7 @@ from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
-from .paths import detect_layout, MT5Layout
+from .paths import detect_layout, MT5Layout, list_terminal_origins, find_terminal_for_install
 from .parsers import (
     parse_compile_log,
     parse_tester_report,
@@ -25,6 +25,8 @@ from . import refactor as _refactor
 from . import optimization as _optimization
 from . import reports as _reports
 from . import snapshot as _snapshot
+from . import smoke as _smoke
+from . import ast_refactor as _ast_refactor
 
 mcp = FastMCP("mt5")
 
@@ -650,6 +652,135 @@ def snapshot_sources(sources: list[str], dest: str, label: Optional[str] = None)
 def list_snapshots(dest: str) -> dict:
     """List all snapshot folders under `dest`."""
     return {"snapshots": _snapshot.list_snapshots(dest)}
+
+
+# ---------------------------------------------------------------------------
+# Terminal selection
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def select_terminal(origin: Optional[str] = None, hash: Optional[str] = None,
+                    install: Optional[str] = None, edition: str = "mt5") -> dict:
+    """Switch the active terminal data folder for this session.
+
+    Provide one of: `origin` (install path stored in origin.txt), `hash` (32-char
+    folder name), or `install` (auto-scan for the matching origin).
+
+    Subsequent tool calls will use the new layout until the server restarts.
+    """
+    global _layout_cache
+    target_install = Path(install) if install else None
+    target_hash = hash
+    if origin:
+        for t in list_terminal_origins():
+            if t["origin"] and t["origin"].strip().lower() == origin.strip().lower():
+                target_hash = t["hash"]
+                break
+        if not target_hash:
+            return {"error": f"no terminal data folder found for origin: {origin}"}
+
+    if target_install and not target_hash:
+        found = find_terminal_for_install(target_install)
+        if found:
+            target_hash, _ = found
+
+    layout_kwargs: dict = {"edition": edition}
+    if target_install:
+        layout_kwargs["install"] = str(target_install)
+    if target_hash:
+        layout_kwargs["terminal_hash"] = target_hash
+
+    new_layout = detect_layout(**layout_kwargs)
+    _layout_cache = new_layout
+    return {
+        "active_install": str(new_layout.install),
+        "active_data": str(new_layout.data),
+        "active_hash": new_layout.terminal_hash,
+        "edition": new_layout.edition,
+        "issues": new_layout.issues(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Smoke test
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def smoke_test(source: str, expert_name: Optional[str] = None,
+               symbol: str = "EURUSD", period: str = "M15", days: int = 1,
+               timeout_sec: int = 600) -> dict:
+    """Compile, deploy, run a 1-day headless backtest, and scan the journal for runtime errors.
+
+    Returns `ok: true` only if compilation, deployment, run, and the journal scan all pass.
+    """
+    return _smoke.run_smoke(
+        layout(),
+        source,
+        expert_name=expert_name,
+        symbol=symbol,
+        period=period,
+        days=days,
+        timeout_sec=timeout_sec,
+    )
+
+
+# ---------------------------------------------------------------------------
+# AST-style refactor
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def extract_function(source: str, line_start: int, line_end: int, new_name: str,
+                     return_type: str = "void", target_file: Optional[str] = None,
+                     dry_run: bool = True) -> dict:
+    """Extract a contiguous block of lines into a new helper function.
+
+    Brace-counting + regex param detection — not a full AST parser. Returns the
+    proposed helper, call site, and parameter list. Set `dry_run=False` to write.
+    """
+    return _ast_refactor.extract_function(
+        source, line_start, line_end, new_name,
+        return_type=return_type, target_file=target_file, dry_run=dry_run,
+    )
+
+
+# ---------------------------------------------------------------------------
+# LiveLog resource (subscription-friendly)
+# ---------------------------------------------------------------------------
+
+@mcp.resource("mt5://livelog")
+def livelog_resource() -> str:
+    """Latest contents of MQL5/Files/LiveLog.txt — clients can re-read for polling updates."""
+    L = layout()
+    path = L.files_dir / "LiveLog.txt"
+    if not path.exists():
+        return f"(no LiveLog at {path})"
+    text = read_text_auto(path)
+    return "\n".join(text.splitlines()[-500:])
+
+
+@mcp.resource("mt5://journal")
+def journal_resource() -> str:
+    """Latest daily MT5 journal log."""
+    L = layout()
+    today = datetime.now().strftime("%Y%m%d")
+    path = L.logs_dir / f"{today}.log"
+    if not path.exists():
+        return f"(no journal for {today} at {path})"
+    text = read_text_auto(path)
+    return "\n".join(text.splitlines()[-500:])
+
+
+@mcp.resource("mt5://tester-log")
+def tester_log_resource() -> str:
+    """Latest Strategy Tester journal log."""
+    L = layout()
+    if not L.tester_logs.exists():
+        return "(no tester log dir)"
+    files = sorted(L.tester_logs.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not files:
+        return "(no tester logs)"
+    text = read_text_auto(files[0])
+    return f"# {files[0].name}\n" + "\n".join(text.splitlines()[-500:])
 
 
 def main():
