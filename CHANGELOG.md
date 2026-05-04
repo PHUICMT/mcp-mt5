@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.3.0 — 2026-05-04
+
+Full dev-loop expansion: 18 new tools across 7 modules.
+
+### Source analysis
+- `extract_inputs` — parse `input <type> <name> = <default>;` declarations into JSON
+- `gen_tester_inputs` — auto-build a `[TesterInputs]` block from EA source (translates `PERIOD_*` enums to numeric codes)
+- `resolve_includes` — recursive `#include` resolution, reports missing files
+- `find_symbol` — grep MQL files skipping comments and string literals
+- `code_metrics` — LOC, function count, max nesting per file or aggregated across a tree
+- `extract_doc` — pull MetaEditor `//+--+ //| ... +--+` doc blocks into markdown
+- `find_magic_collision` — detect duplicate magic-number assignments
+
+### Lint / validation
+- `syntax_check` — MetaEditor `/s` syntax-only mode for fast feedback
+- `lint_basic` — structural rules (missing `OnInit`/`OnDeinit`, unused inputs, hardcoded magic, hardcoded symbol)
+- `check_deprecated` — flag MT4-style API calls (`OrderSend`, `Ask`, `AccountBalance`, …) with CTrade-style replacements
+- `validate_tester_ini` — required keys, date format, numeric sanity, cross-check inputs vs EA source
+
+### Formatting
+- `format_mql` / `format_check` — clang-format wrap (treats MQL as C++ with an MQL-friendly default style)
+
+### Refactor
+- `rename_symbol` — whole-word rename across the project, with `dry_run` preview
+
+### Optimization
+- `parse_optimization` — best-effort `.opt` binary reader
+- `top_passes` — sort optimization passes by criterion
+
+### Reports
+- `compare_reports` — diff two tester reports key-by-key with absolute and percent deltas
+- `regression_check` — guard thresholds (e.g. "net_profit may not drop more than 5%") with violation reporting
+
+### Snapshots
+- `snapshot_sources` — freeze a copy of source files into a timestamped manifest folder
+- `list_snapshots` — enumerate previously captured snapshots
+
+### Internal
+- New modules: `analysis.py`, `lint.py`, `formatting.py`, `refactor.py`, `optimization.py`, `reports.py`, `snapshot.py`
+- Test suite expanded from 18 → 38 cases
+
 ## 0.2.0 — 2026-05-04
 
 - Refactor into `paths.py` (layout detection) + `parsers.py` (compile log + tester report) + `server.py` (MCP tools)

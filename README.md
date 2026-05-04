@@ -27,7 +27,7 @@ For runtime trading, pair this with a live-trading MCP — they target different
 
 ## Tools
 
-The server exposes 11 tools across four categories.
+The server exposes 29 tools across eight categories.
 
 ### 🔍 Discovery
 
@@ -42,9 +42,43 @@ The server exposes 11 tools across four categories.
 |------|-------------|
 | `compile` | Invoke MetaEditor CLI on a `.mq4`/`.mq5`/`.mqh` source. Returns structured `errors[]`/`warnings[]` (file, line, column, error code, message) plus log excerpt |
 | `compile_and_deploy` | Compile, then copy the resulting `.ex4`/`.ex5` into the terminal's `Experts/` folder in one call |
+| `syntax_check` | Same as `compile` but uses MetaEditor's `/s` syntax-only mode for faster feedback |
 | `deploy_ea` | Copy a compiled binary into `Experts/` (with optional rename) |
 | `install_include` | Copy a `.mqh` header into the terminal `Include/` folder — handy for libraries like `LiveLog.mqh` |
 | `list_experts` | Enumerate `Experts/` recursively with size and modification time |
+
+### 🔎 Source analysis
+
+| Tool | Description |
+|------|-------------|
+| `extract_inputs` | Parse `input <type> <name> = <default>;` declarations into structured records |
+| `gen_tester_inputs` | Auto-build a `[TesterInputs]` block from EA source (translates `PERIOD_*` enums to numeric codes), optionally write into an existing `tester.ini` |
+| `resolve_includes` | Recursive `#include` resolution that reports missing files and circular references |
+| `find_symbol` | Grep a symbol across MQL files, skipping comments and string literals |
+| `code_metrics` | LOC, function count, max nesting per file — or aggregated across an entire tree |
+| `extract_doc` | Pull MetaEditor `//+--+ //\| ... +--+` doc blocks out as markdown |
+| `find_magic_collision` | Detect duplicate magic-number assignments across the project |
+
+### ⚠️ Lint & validation
+
+| Tool | Description |
+|------|-------------|
+| `lint_basic` | Structural rules: missing `OnInit`/`OnDeinit`, unused `input`s, hardcoded magic numbers, hardcoded symbol literals |
+| `check_deprecated` | Flag MT4-style API calls (`OrderSend`, `Ask`, `AccountBalance`, …) with `CTrade`/MT5-API replacement suggestions |
+| `validate_tester_ini` | Sanity-check a `tester.ini` (required keys, date format, numeric ranges) and cross-check `[TesterInputs]` against the EA source declarations |
+
+### 🎨 Format
+
+| Tool | Description |
+|------|-------------|
+| `format_mql` | Format a source file via `clang-format` (treats MQL as C++ with an MQL-friendly default style) |
+| `format_check` | Same as above but reports whether changes are needed without writing the file |
+
+### ✏️ Refactor
+
+| Tool | Description |
+|------|-------------|
+| `rename_symbol` | Whole-word rename across all MQL files in a tree, with `dry_run` preview |
 
 ### 📊 Strategy Tester
 
@@ -52,14 +86,20 @@ The server exposes 11 tools across four categories.
 |------|-------------|
 | `patch_tester_ini` | Programmatically update keys in a `tester.ini` (e.g. `Tester.Symbol`, `Tester.FromDate`, `TesterInputs.RiskPct`) before running |
 | `run_backtest` | Launch `terminal64.exe /config:tester.ini`, optionally headless (when `ShutdownTerminal=1`), and return the latest tester log path |
+| `parse_optimization` | Best-effort parser for the latest `.opt` (optimization passes) binary file |
+| `top_passes` | Sort optimization passes by a chosen criterion and return the top *N* |
 | `read_tester_report` | Locate and parse the latest tester HTML report into a structured `summary` (net profit, profit factor, drawdown, trade counts, etc.) plus a sample of trade rows |
+| `compare_reports` | Diff two tester reports key-by-key with absolute and percent deltas |
+| `regression_check` | Verify a candidate report stays within guard thresholds vs a baseline (e.g. "net_profit may not drop more than 5%") |
 | `kill_terminal` | `taskkill` if the terminal hangs |
 
-### 📝 Logs
+### 📝 Logs & snapshots
 
 | Tool | Description |
 |------|-------------|
 | `tail_log` | Tail the last *N* lines of either `Files/LiveLog.txt`, the daily `Logs/YYYYMMDD.log`, or the most recent tester log. Optional structured parse into `{ts, source, message}` records |
+| `snapshot_sources` | Freeze a copy of source files into a timestamped folder with a `manifest.json` |
+| `list_snapshots` | Enumerate previously captured snapshots |
 
 ---
 
@@ -222,10 +262,10 @@ mcp-mt5/
 
 ## Roadmap
 
-- Strategy Tester optimization (`Optimization=1`) result parser
-- Auto-snapshot of source files at backtest time (parity with the `MQL Clangd` extension's source-snapshot feature)
 - Cross-broker terminal selection helper (`select_terminal` by origin path or hash)
 - Long-running log subscription via MCP resources
+- Smoke-test runner that boots a 1-day Strategy Tester pass and asserts no runtime errors
+- AST-based `extract_function` refactor (currently regex-based rename only)
 
 ---
 

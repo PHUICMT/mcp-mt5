@@ -18,6 +18,13 @@ from .parsers import (
     read_text_auto,
     iter_journal_lines,
 )
+from . import analysis as _analysis
+from . import lint as _lint
+from . import formatting as _formatting
+from . import refactor as _refactor
+from . import optimization as _optimization
+from . import reports as _reports
+from . import snapshot as _snapshot
 
 mcp = FastMCP("mt5")
 
@@ -430,6 +437,219 @@ def compile_and_deploy(source: str, ea_name: Optional[str] = None) -> dict:
 
     deploy_res = deploy_ea(str(binary), name=ea_name)
     return {"compile": res, "deploy": deploy_res, "ok": "error" not in deploy_res}
+
+
+# ---------------------------------------------------------------------------
+# Source analysis
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def extract_inputs(source: str) -> dict:
+    """Parse `input <type> <name> = <default>;` declarations from a source file."""
+    return {"file": source, "inputs": _analysis.extract_inputs(source)}
+
+
+@mcp.tool()
+def gen_tester_inputs(source: str, write_to: Optional[str] = None) -> dict:
+    """Generate a `[TesterInputs]` block from EA inputs.
+
+    If `write_to` points at a tester.ini, the block is appended/replaced in-place.
+    """
+    block = _analysis.gen_tester_inputs(source)
+    out: dict = {"block": block, "input_count": block.count("\n") - 1 if block else 0}
+    if write_to:
+        target = Path(write_to)
+        if target.exists():
+            text = target.read_text(encoding="utf-8")
+            if "[TesterInputs]" in text:
+                head = text.split("[TesterInputs]", 1)[0].rstrip()
+                target.write_text(head + "\n\n" + block, encoding="utf-8")
+            else:
+                target.write_text(text.rstrip() + "\n\n" + block, encoding="utf-8")
+            out["written_to"] = str(target)
+    return out
+
+
+@mcp.tool()
+def resolve_includes(source: str, mql_root: Optional[str] = None) -> dict:
+    """Recursively resolve `#include` directives. Reports unresolved files."""
+    L = layout()
+    return _analysis.resolve_includes(source, mql_root or str(L.mql_root))
+
+
+@mcp.tool()
+def find_symbol(symbol: str, root: str, exts: Optional[list[str]] = None,
+                limit: int = 200) -> dict:
+    """Grep a symbol across MQL files, skipping comments and string literals."""
+    matches = _analysis.find_symbol(
+        symbol, root,
+        exts=tuple(exts) if exts else (".mq4", ".mq5", ".mqh"),
+        limit=limit,
+    )
+    return {"symbol": symbol, "root": root, "match_count": len(matches), "matches": matches}
+
+
+@mcp.tool()
+def code_metrics(source: Optional[str] = None, root: Optional[str] = None) -> dict:
+    """Compute LOC/function/nesting metrics for a file or every MQL file under a root."""
+    if source:
+        return _analysis.code_metrics(source)
+    if root:
+        return _analysis.aggregate_metrics(root)
+    return {"error": "provide either source or root"}
+
+
+@mcp.tool()
+def extract_doc(source: str) -> dict:
+    """Extract MetaEditor `//+--+ //| ... +--+` doc blocks from a source file."""
+    return {"file": source, "blocks": _analysis.extract_doc(source)}
+
+
+@mcp.tool()
+def find_magic_collision(root: str, var_pattern: str = "Magic") -> dict:
+    """Find duplicate magic-number assignments across the project."""
+    return _analysis.find_magic_collision(root, var_pattern=var_pattern)
+
+
+# ---------------------------------------------------------------------------
+# Lint / validation
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def syntax_check(source: str, timeout_sec: int = 60) -> dict:
+    """Compile a source via MetaEditor's syntax-only mode (`/s`) and return diagnostics."""
+    L = layout()
+    src = Path(source)
+    if not src.exists():
+        return {"error": f"source not found: {src}"}
+    if not L.metaeditor.exists():
+        return {"error": f"MetaEditor missing: {L.metaeditor}"}
+
+    log_path = src.with_suffix(src.suffix + ".syntax.log")
+    cmd = [str(L.metaeditor), "/s", f"/compile:{src}", f"/include:{L.mql_root}", f"/log:{log_path}"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
+        rc = proc.returncode
+    except subprocess.TimeoutExpired:
+        rc = -1
+    parsed = {"errors": [], "warnings": [], "result_errors": None, "result_warnings": None, "ok": False}
+    excerpt = ""
+    if log_path.exists():
+        text = read_text_auto(log_path)
+        parsed = parse_compile_log(text)
+        excerpt = "\n".join(text.splitlines()[-40:])
+    return {
+        "returncode": rc,
+        "ok": parsed["ok"],
+        "errors": parsed["errors"][:50],
+        "warnings": parsed["warnings"][:50],
+        "result_errors": parsed["result_errors"],
+        "result_warnings": parsed["result_warnings"],
+        "log_excerpt": excerpt,
+    }
+
+
+@mcp.tool()
+def lint_basic(source: str) -> dict:
+    """Run structural lint rules (missing handlers, unused inputs, hardcoded magic/symbol)."""
+    return _lint.lint_basic(source)
+
+
+@mcp.tool()
+def check_deprecated(source: str) -> dict:
+    """Flag MT4-style deprecated API calls in MT5 source."""
+    return {"file": source, "findings": _lint.check_deprecated(source)}
+
+
+@mcp.tool()
+def validate_tester_ini(config: str, source: Optional[str] = None) -> dict:
+    """Sanity-check a tester.ini. If `source` given, cross-check inputs vs EA declarations."""
+    return _lint.validate_tester_ini(config, source=source)
+
+
+# ---------------------------------------------------------------------------
+# Formatting
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def format_mql(source: str, style: Optional[str] = None, write: bool = True) -> dict:
+    """Format an MQL file via clang-format (treats source as C++)."""
+    return _formatting.format_mql(source, style=style, write=write)
+
+
+@mcp.tool()
+def format_check(source: str, style: Optional[str] = None) -> dict:
+    """Report whether a file needs formatting without writing it."""
+    return _formatting.format_check(source, style=style)
+
+
+# ---------------------------------------------------------------------------
+# Refactor
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def rename_symbol(old: str, new: str, root: str, dry_run: bool = True) -> dict:
+    """Rename a symbol across MQL files (whole-word match). `dry_run=True` previews only."""
+    return _refactor.rename_symbol(old, new, root, dry_run=dry_run)
+
+
+# ---------------------------------------------------------------------------
+# Optimization
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def parse_optimization(path: Optional[str] = None) -> dict:
+    """Parse the latest `.opt` file in the Tester folder, or one given by `path`."""
+    L = layout()
+    target = path or _optimization.find_latest_opt(L.tester_dir)
+    if not target:
+        return {"error": "no .opt file found"}
+    return _optimization.parse_opt_file(target)
+
+
+@mcp.tool()
+def top_passes(opt_path: Optional[str] = None, criterion: str = "profit",
+               n: int = 10, descending: bool = True) -> dict:
+    """Sort optimization passes by criterion and return the top N."""
+    parsed = parse_optimization(opt_path)
+    passes = parsed.get("passes_sample") or []
+    return {
+        "criterion": criterion,
+        "n": n,
+        "top": _optimization.top_passes(passes, criterion=criterion, n=n, descending=descending),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Reports comparison
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def compare_reports(baseline: str, candidate: str) -> dict:
+    """Diff two MT5 tester HTML reports key-by-key with absolute and percent deltas."""
+    return _reports.compare_reports(baseline, candidate)
+
+
+@mcp.tool()
+def regression_check(baseline: str, candidate: str, guards: Optional[dict] = None) -> dict:
+    """Verify candidate report stays within guard thresholds vs baseline."""
+    return _reports.regression_check(baseline, candidate, guards=guards)
+
+
+# ---------------------------------------------------------------------------
+# Source snapshots
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def snapshot_sources(sources: list[str], dest: str, label: Optional[str] = None) -> dict:
+    """Freeze a copy of source files into a timestamped folder under `dest`."""
+    return _snapshot.snapshot_sources(sources, dest, label=label)
+
+
+@mcp.tool()
+def list_snapshots(dest: str) -> dict:
+    """List all snapshot folders under `dest`."""
+    return {"snapshots": _snapshot.list_snapshots(dest)}
 
 
 def main():
