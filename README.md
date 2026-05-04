@@ -153,9 +153,9 @@ Once registered, ask your agent to call `env_info`:
 {
   "edition": "mt5",
   "install": "C:\\Program Files\\MetaTrader 5",
-  "terminal_hash": "D0E8209F77C8CF37AD8BF550E51FF075",
+  "terminal_hash": "<32-char-hex-hash>",
   "metaeditor": "C:\\Program Files\\MetaTrader 5\\MetaEditor64.exe",
-  "experts_dir": "C:\\Users\\...\\MQL5\\Experts",
+  "experts_dir": "C:\\Users\\<you>\\AppData\\Roaming\\MetaQuotes\\Terminal\\<hash>\\MQL5\\Experts",
   "issues": []
 }
 ```
