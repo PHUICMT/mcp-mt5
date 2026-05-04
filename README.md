@@ -1,63 +1,81 @@
 # mcp-mt5
 
-MCP server for the **MetaTrader 4/5 build pipeline** — compile MQL sources, deploy compiled EAs, run Strategy Tester, parse reports, tail logs. CLI-driven (`MetaEditor64.exe`, `terminal64.exe`), no live broker connection, no Python `MetaTrader5` dependency.
+> **Model Context Protocol server for the MetaTrader 4/5 build pipeline.**
+> Compile MQL sources, deploy compiled EAs, run Strategy Tester, parse reports, tail logs — all driven by an LLM agent without touching the MetaTrader UI.
 
-> Complements live-trading MCPs by covering the **dev loop**: edit → compile → deploy → backtest → analyze.
+[![CI](https://github.com/PHUICMT/mcp-mt5/actions/workflows/ci.yml/badge.svg)](https://github.com/PHUICMT/mcp-mt5/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)](https://www.metaquotes.net/)
 
-## Why this exists
+---
 
-Existing MetaTrader MCP servers wrap the runtime Python API (positions, orders, quotes). None drive `MetaEditor64.exe` directly to compile `.mq5` files or invoke `terminal64.exe` for headless backtests. This server fills that gap so an LLM agent can iterate on a strategy without a human clicking through MT5's UI.
+## What this is — and what it isn't
 
-## Features
+| ✅ This server | ❌ Not this server |
+|----------------|--------------------|
+| MetaTrader **dev harness** — compile, deploy, backtest, parse | Live trading (orders, positions, quotes) |
+| Wraps `MetaEditor64.exe` / `terminal64.exe` CLI directly | Wraps the `MetaTrader5` Python package |
+| Runs entirely offline against installed terminal | Connects to a broker server |
+| Iterates strategies *before* they go live | Executes strategies in production |
 
-- **`compile`** — invoke MetaEditor CLI, parse log into structured `errors[]`/`warnings[]` with file/line/code/message
-- **`compile_and_deploy`** — compile + copy `.ex5` to `Experts/` in one shot
-- **`run_backtest`** — launch `terminal64.exe /config:tester.ini` (headless when `ShutdownTerminal=1`)
-- **`patch_tester_ini`** — programmatically edit `tester.ini` keys before running
-- **`read_tester_report`** — parse Strategy Tester HTML report into `summary` (PnL, profit factor, drawdown, etc.) + trade rows
-- **`tail_log`** — read tail of `LiveLog.txt`, daily journal, or latest tester log; optional structured parsing
-- **`deploy_ea`**, **`install_include`**, **`list_experts`** — file management
-- **`list_terminals`** — enumerate all MT4/5 data folders + their `origin.txt` install paths
-- **`kill_terminal`** — `taskkill` if MT5 hangs
-- **`env_info`** — debug path resolution
+> **Use case:** an LLM agent edits `.mq5` source → compiles → deploys → runs Strategy Tester → reads report → adjusts → repeats. No broker login, no human in the loop, no risk of real-money execution.
 
-## Install
+For runtime trading, pair this with a live-trading MCP — they target different layers and compose well.
+
+---
+
+## Tools
+
+The server exposes 11 tools across four categories.
+
+### 🔍 Discovery
+
+| Tool | Description |
+|------|-------------|
+| `env_info` | Dump resolved paths, terminal hash, edition, and missing-component issues |
+| `list_terminals` | Enumerate every MT4/5 terminal data folder under `%APPDATA%\MetaQuotes\Terminal` along with each `origin.txt` install path |
+
+### 🔨 Build & deploy
+
+| Tool | Description |
+|------|-------------|
+| `compile` | Invoke MetaEditor CLI on a `.mq4`/`.mq5`/`.mqh` source. Returns structured `errors[]`/`warnings[]` (file, line, column, error code, message) plus log excerpt |
+| `compile_and_deploy` | Compile, then copy the resulting `.ex4`/`.ex5` into the terminal's `Experts/` folder in one call |
+| `deploy_ea` | Copy a compiled binary into `Experts/` (with optional rename) |
+| `install_include` | Copy a `.mqh` header into the terminal `Include/` folder — handy for libraries like `LiveLog.mqh` |
+| `list_experts` | Enumerate `Experts/` recursively with size and modification time |
+
+### 📊 Strategy Tester
+
+| Tool | Description |
+|------|-------------|
+| `patch_tester_ini` | Programmatically update keys in a `tester.ini` (e.g. `Tester.Symbol`, `Tester.FromDate`, `TesterInputs.RiskPct`) before running |
+| `run_backtest` | Launch `terminal64.exe /config:tester.ini`, optionally headless (when `ShutdownTerminal=1`), and return the latest tester log path |
+| `read_tester_report` | Locate and parse the latest tester HTML report into a structured `summary` (net profit, profit factor, drawdown, trade counts, etc.) plus a sample of trade rows |
+| `kill_terminal` | `taskkill` if the terminal hangs |
+
+### 📝 Logs
+
+| Tool | Description |
+|------|-------------|
+| `tail_log` | Tail the last *N* lines of either `Files/LiveLog.txt`, the daily `Logs/YYYYMMDD.log`, or the most recent tester log. Optional structured parse into `{ts, source, message}` records |
+
+---
+
+## Quick start
+
+### Install
 
 ```bash
 pip install mcp-mt5
 ```
 
-(Requires Windows + MetaTrader 4 or 5 already installed.)
+> Requires Windows + an installed MetaTrader 4 or 5 terminal.
 
-For development:
+### Register with an MCP client
 
-```bash
-git clone https://github.com/PHUICMT/mcp-mt5
-cd mcp-mt5
-pip install -e ".[dev]"
-pytest
-```
-
-## Configuration
-
-The server resolves the MetaTrader install + data folder in this order:
-
-1. Explicit env vars (`MT5_INSTALL`, `MT5_DATA`, `MT5_TERMINAL_HASH`, `MT5_EDITION`)
-2. Auto-scan `%APPDATA%\MetaQuotes\Terminal\*\origin.txt` matching the install path
-3. Fall back to portable mode (data colocated with install)
-
-| Env var | Default | Notes |
-|---------|---------|-------|
-| `MT5_INSTALL` | `C:\Program Files\MetaTrader 5` | Install dir containing `terminal64.exe` |
-| `MT5_DATA` | (auto-detected) | `%APPDATA%\MetaQuotes\Terminal\<hash>` |
-| `MT5_TERMINAL_HASH` | (auto-detected) | 32-char folder name |
-| `MT5_EDITION` | `mt5` | `mt4` or `mt5` |
-
-Run `env_info` once to verify resolution.
-
-## Register with an MCP client
-
-Most MCP clients accept a JSON entry under `mcpServers`. Example config:
+Most MCP clients accept a JSON entry under `mcpServers`. The server inherits its configuration from environment variables:
 
 ```json
 {
@@ -74,28 +92,143 @@ Most MCP clients accept a JSON entry under `mcpServers`. Example config:
 
 Refer to your client's documentation for the exact config file location.
 
+### Verify the install
+
+Once registered, ask your agent to call `env_info`:
+
+```json
+{
+  "edition": "mt5",
+  "install": "C:\\Program Files\\MetaTrader 5",
+  "terminal_hash": "D0E8209F77C8CF37AD8BF550E51FF075",
+  "metaeditor": "C:\\Program Files\\MetaTrader 5\\MetaEditor64.exe",
+  "experts_dir": "C:\\Users\\...\\MQL5\\Experts",
+  "issues": []
+}
+```
+
+An empty `issues` array means everything is wired up correctly.
+
+---
+
+## Configuration
+
+Resolution priority for the MetaTrader install + data folder:
+
+1. **Explicit env vars** (below)
+2. **Auto-scan** of `%APPDATA%\MetaQuotes\Terminal\*\origin.txt` for a folder whose origin matches `MT5_INSTALL`
+3. **Portable mode** fallback (data colocated with install dir)
+
+| Env var | Default | Notes |
+|---------|---------|-------|
+| `MT5_INSTALL` | `C:\Program Files\MetaTrader 5` | Install dir containing `terminal64.exe` |
+| `MT5_DATA` | _(auto-detected)_ | `%APPDATA%\MetaQuotes\Terminal\<hash>` |
+| `MT5_TERMINAL_HASH` | _(auto-detected)_ | 32-char folder name |
+| `MT5_EDITION` | `mt5` | Set to `mt4` for MetaTrader 4 |
+
+### MT4 support
+
+Set `MT5_EDITION=mt4` and point `MT5_INSTALL` at your MT4 install. The server switches to `metaeditor.exe` (32-bit), `terminal.exe`, and the `MQL4/` data tree automatically.
+
+---
+
 ## Example workflow
 
+A typical LLM-driven iteration loop:
+
 ```
-1. env_info                          → verify paths
-2. compile source="MyEA.mq5"         → 0 errors/warnings ✅
-3. deploy_ea source_ex="MyEA.ex5"    → copied to Experts/
-4. patch_tester_ini config="tester.ini" updates={"Tester.Symbol":"EURUSD"}
-5. run_backtest config="tester.ini"
-6. read_tester_report                → summary.net_profit, profit_factor, ...
-7. tail_log mode="tester" lines=200  → diagnose journal warnings
+1. env_info                                          → verify paths
+2. compile_and_deploy source="MyEA.mq5"              → 0 errors, .ex5 deployed ✅
+3. patch_tester_ini config="tester.ini" updates={
+     "Tester.Symbol": "EURUSD",
+     "Tester.FromDate": "2025.01.01",
+     "TesterInputs.RiskPct": "1.5"
+   }
+4. run_backtest config="tester.ini" wait=true
+5. read_tester_report                                → summary.net_profit = 1234.56
+                                                       summary.profit_factor = 1.45
+6. tail_log mode="tester" lines=200 structured=true  → diagnose journal warnings
+7. <edit Signal.mqh based on findings>
+8. → loop back to step 2
 ```
 
-## MT4 support
+---
 
-Set `MT5_EDITION=mt4` and `MT5_INSTALL` to the MT4 install dir. The server will use `metaeditor.exe` (32-bit), `terminal.exe`, and the `MQL4/` data tree.
+## A sample `tester.ini`
+
+```ini
+; Launch: terminal64.exe /config:tester.ini
+; Period codes: M1=1, M5=5, M15=15, H1=16385, H4=16388, D1=16408
+; Model: 0=Every tick, 1=1 min OHLC, 4=Real ticks
+
+[Tester]
+Expert=MyEA
+Symbol=EURUSD
+Period=M15
+Model=1
+FromDate=2024.01.01
+ToDate=2024.12.31
+Deposit=10000
+Currency=USD
+Leverage=500
+Visual=0
+ShutdownTerminal=1     ; required so run_backtest can wait for the run to finish
+Report=tester_report
+
+[TesterInputs]
+; ParamName=value||start||step||stop||(N=fixed|Y=optimize)
+; RiskPct=1.0||0.1||0.1||3.0||N
+```
+
+A more complete sample lives at [`examples/tester.ini`](examples/tester.ini).
+
+---
+
+## Development
+
+```bash
+git clone https://github.com/PHUICMT/mcp-mt5
+cd mcp-mt5
+pip install -e ".[dev]"
+pytest                    # runs the 18-test suite
+ruff check src tests      # lints
+```
+
+CI runs on Windows for Python 3.10, 3.11, and 3.12 against every push to `main`. Tagging a release (e.g. `v0.2.0`) triggers an OIDC publish to PyPI.
+
+### Project layout
+
+```
+mcp-mt5/
+├── src/mcp_mt5/
+│   ├── server.py        # FastMCP tool definitions
+│   ├── paths.py         # Layout detection + origin.txt scan
+│   └── parsers.py       # Compile log + tester HTML report parsers
+├── tests/               # 18 pytest tests, no live MT5 required
+├── examples/            # Sample tester.ini + client config
+└── .github/workflows/   # CI + PyPI release
+```
+
+---
 
 ## Limitations
 
-- Windows-only (MetaTrader CLI binaries don't ship for Linux/macOS; use Wine for ports).
-- No live broker access — use a separate MCP server for runtime trading.
-- Tester report parser is best-effort (MT5 HTML is brittle); raw HTML is also returned.
+- **Windows-only.** MetaTrader CLI binaries don't ship for Linux/macOS. Wine ports may work but are untested.
+- **No live broker access.** This server intentionally never authenticates to a broker. Use a separate MCP server for runtime trading.
+- **Tester report parsing is best-effort.** MetaTrader's HTML output isn't a stable schema; the raw HTML is also returned alongside the parsed structure so you can fall back to text inspection when needed.
+- **Optimization runs are not parsed yet.** Single-pass backtests are fully supported; `.opt` results are on the roadmap.
+
+---
+
+## Roadmap
+
+- Strategy Tester optimization (`Optimization=1`) result parser
+- Auto-snapshot of source files at backtest time (parity with the `MQL Clangd` extension's source-snapshot feature)
+- Cross-broker terminal selection helper (`select_terminal` by origin path or hash)
+- Long-running log subscription via MCP resources
+
+---
 
 ## License
 
-MIT
+[MIT](LICENSE) © 2026 PHUICMT
