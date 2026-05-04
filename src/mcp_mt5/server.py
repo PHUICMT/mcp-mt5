@@ -41,6 +41,24 @@ def layout() -> MT5Layout:
     return _layout_cache
 
 
+def _workdir(source: Path) -> Path:
+    """Return a hidden working directory for compile logs / smoke ini files.
+
+    Resolution order:
+      1. `MT5_WORK_DIR` env var (absolute path)
+      2. `<source-parent>/.mt5tmp/`
+
+    Directory is created if missing. Add `.mt5tmp/` to `.gitignore` to keep it out of VCS.
+    """
+    explicit = os.environ.get("MT5_WORK_DIR")
+    if explicit:
+        d = Path(explicit)
+    else:
+        d = source.parent / ".mt5tmp"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 @mcp.tool()
 def env_info() -> dict:
     """Resolve and report MT4/5 paths, terminal hash, and missing-component issues."""
@@ -119,7 +137,7 @@ def compile(
         return {"error": f"MetaEditor missing: {L.metaeditor}"}
 
     inc = Path(include) if include else L.mql_root
-    log_path = Path(log_file) if log_file else src.with_suffix(src.suffix + ".log")
+    log_path = Path(log_file) if log_file else (_workdir(src) / f"{src.stem}.compile.log")
 
     cmd = [
         str(L.metaeditor),
@@ -527,7 +545,7 @@ def syntax_check(source: str, timeout_sec: int = 60) -> dict:
     if not L.metaeditor.exists():
         return {"error": f"MetaEditor missing: {L.metaeditor}"}
 
-    log_path = src.with_suffix(src.suffix + ".syntax.log")
+    log_path = _workdir(src) / f"{src.stem}.syntax.log"
     cmd = [str(L.metaeditor), "/s", f"/compile:{src}", f"/include:{L.mql_root}", f"/log:{log_path}"]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)

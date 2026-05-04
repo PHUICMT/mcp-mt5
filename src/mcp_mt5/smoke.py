@@ -1,6 +1,7 @@
 """Smoke test: compile + 1-day backtest + journal error scan."""
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import time
@@ -9,6 +10,13 @@ from pathlib import Path
 from typing import Optional
 
 from .parsers import read_text_auto
+
+
+def _workdir(source: Path) -> Path:
+    explicit = os.environ.get("MT5_WORK_DIR")
+    d = Path(explicit) if explicit else (source.parent / ".mt5tmp")
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 _RUNTIME_ERROR_PATTERNS = [
@@ -108,7 +116,8 @@ def run_smoke(
         return {"ok": False, "stage": "input", "error": f"source not found: {src}"}
 
     # 1. Compile
-    log_path = src.with_suffix(src.suffix + ".log")
+    work = _workdir(src)
+    log_path = work / f"{src.stem}.smoke.compile.log"
     cmd = [str(layout.metaeditor), f"/compile:{src}", f"/include:{layout.mql_root}",
            f"/log:{log_path}"]
     try:
@@ -132,7 +141,7 @@ def run_smoke(
 
     # 3. tester.ini
     ea_name = expert_name or binary.stem
-    cfg = src.with_name(f"{src.stem}.smoke.ini")
+    cfg = work / f"{src.stem}.smoke.ini"
     write_smoke_tester_ini(ea_name, cfg, symbol=symbol, period=period, days=days)
 
     # 4. Run terminal

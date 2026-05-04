@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.1 — 2026-05-04
+
+### Changed
+- `compile`, `syntax_check`, and `smoke_test` now write logs and temporary tester ini
+  files into a hidden `.mt5tmp/` directory next to the source instead of leaking
+  `*.log` and `*.smoke.ini` files into the project root.
+- Override the working directory via the `MT5_WORK_DIR` environment variable.
+- Add `.mt5tmp/` to your project `.gitignore` to keep these artefacts out of VCS.
+
 ## 0.4.0 — 2026-05-04
 
 Roadmap completion: cross-broker selection, smoke harness, log subscription, AST refactor.

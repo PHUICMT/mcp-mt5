@@ -41,9 +41,10 @@ def test_compile_missing_source(fake_layout):
 def test_compile_invokes_metaeditor(fake_layout, tmp_path):
     src = tmp_path / "test.mq5"
     src.write_text("// test")
-    log = tmp_path / "test.mq5.log"
+    log = tmp_path / ".mt5tmp" / "test.compile.log"
 
     def fake_run(cmd, capture_output, text, timeout):
+        log.parent.mkdir(parents=True, exist_ok=True)
         log.write_text("Result: 0 errors, 0 warnings, 50 ms elapsed\n", encoding="utf-8")
 
         class R:
