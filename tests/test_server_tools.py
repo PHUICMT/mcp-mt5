@@ -1,7 +1,6 @@
 """Server-level tool tests with subprocess + filesystem mocked via tmp_path."""
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -46,7 +45,12 @@ def test_compile_invokes_metaeditor(fake_layout, tmp_path):
 
     def fake_run(cmd, capture_output, text, timeout):
         log.write_text("Result: 0 errors, 0 warnings, 50 ms elapsed\n", encoding="utf-8")
-        class R: returncode = 0; stdout = ""; stderr = ""
+
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
         return R()
 
     with patch("subprocess.run", side_effect=fake_run):

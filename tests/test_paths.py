@@ -1,7 +1,6 @@
-import os
 from pathlib import Path
 
-from mcp_mt5.paths import detect_layout, find_terminal_for_install, MT5Layout
+from mcp_mt5.paths import detect_layout, find_terminal_for_install
 
 
 def test_detect_layout_explicit_data(tmp_path: Path, monkeypatch):
