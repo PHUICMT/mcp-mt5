@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "mt5": {
+      "command": "mcp-mt5",
+      "env": {
+        "MT5_INSTALL": "C:\\Program Files\\MetaTrader 5"
+      }
+    }
+  }
+}
