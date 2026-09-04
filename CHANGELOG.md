@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.2 — 2026-09-04
+
+Bug-fix release. No new tools; several results that were silently wrong are now correct.
+
+### Fixed
+- **Install**: pin `mcp>=1.28,<2`. `mcp` 2.x renamed `FastMCP`, so every fresh install of 0.4.1 failed to import.
+- **CI**: pin the ruff rule set (`E4,E7,E9,F`) so default-rule changes in newer ruff cannot turn CI red.
+- **Compile success** now requires a `Result:` line with zero errors *and* an `.ex5`/`.ex4` newer than the invocation. A log without `Result:` (MetaEditor's silent-failure shape) is no longer treated as success. `compile` returns `result_line_found`, `binary_path`, `binary_fresh`.
+- **`smoke_test`** used `"0 errors" not in log`, which matched `"10 errors"`; it now uses the compile-log parser and the freshness check, and only scans tester logs written by its own run.
+- **`read_tester_report`** looked in `Tester/`; MT5 writes `Report=` relative to the data folder (or the install dir in `/portable`). Discovery now covers both plus `Tester/`, newest first, and `run_backtest` resolves the expected report path from the ini it ran (`report_path`).
+- **`run_backtest` / `smoke_test`** detach the terminal's stdout/stderr (a child writing to stdout corrupts the MCP stdio transport), track the terminal PID, and surface tester journal notes: `start time changed to …` (the tester moved `FromDate`), `history data begins from`, `tested with error`.
+- **`kill_terminal`** kills only terminals launched by this server; `all_instances=true` restores the old kill-everything behaviour. A live-trading terminal on the same machine is no longer collateral.
+- **`top_passes`** ranked only the first 50 passes; it now ranks the complete pass list.
+- **`parse_optimization`** replaces the guessed `.opt` record offsets with the `TesterOptCache` layout MetaQuotes published (`OptReader.mqh`): full header, input descriptors, all ENUM_STATISTICS fields and the optimised input values per pass. Unknown layouts are reported, never guessed. `find_latest_opt` can select by expert/symbol/period from the documented filename schema instead of mtime.
+- **`format_mql`** defaults to a dry run (`write=false`) and protects `D'…'`, `C'…'`, `S'…'` literals and `input group` / `#property` / `#resource` / `#import` lines, which clang-format used to mangle.
+- **Encoding**: UTF-16 files without a BOM are detected; `patch_tester_ini`, `gen_tester_inputs`, `rename_symbol`, `extract_function` and `format_mql` write back in the file's original encoding (MT5 writes ini/set files as UTF-16 LE).
+- **`list_experts`** defaults to `*.ex4` on MT4.
+- **`extract_function`** only turns declarations inside the enclosing function into parameters (globals and other functions' locals leaked before).
+- **`find_symbol`** no longer re-splits the file for every match (quadratic on large files).
+- Shared `workdir()` helper replaces two copies; `list_terminals` reuses `paths.list_terminal_origins`; a `reset_layout_cache()` helper fixes test-order dependence on the layout cache.
+- README: tool/test counts and the stale "optimisation not parsed yet" limitation.
+- **Report parser, verified against real MT5 and MT4 reports from public repositories**: labels are matched case-insensitively for both MT5 ("Total Net Profit") and MT4 ("Total net profit") spellings, the first value seen wins (the deals-table header "Symbol | Type" no longer overwrites `symbol`), and ~45 additional fields are extracted (balance/equity drawdown absolute/maximal/relative, History Quality, AHPR/GHPR, LR correlation, Z-Score, consecutive-trade stats, holding times). `compare_reports`/`regression_check` now parse MT5's space-grouped numbers ("10 000.00") and composite cells ("359.61 (3.34%)").
+
 ## 0.4.1 — 2026-05-04
 
 ### Changed

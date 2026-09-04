@@ -132,9 +132,10 @@ def find_symbol(symbol: str, root: str | Path, exts: tuple[str, ...] = (".mq4", 
             except Exception:
                 continue
             cleaned = _strip_comments_strings(text)
+            raw_lines = text.splitlines()
             for i, line in enumerate(cleaned.splitlines(), 1):
                 if pat.search(line):
-                    raw_line = text.splitlines()[i - 1] if i - 1 < len(text.splitlines()) else ""
+                    raw_line = raw_lines[i - 1] if i - 1 < len(raw_lines) else ""
                     out.append({"file": str(f), "line": i, "text": raw_line.strip()})
                     if len(out) >= limit:
                         return out

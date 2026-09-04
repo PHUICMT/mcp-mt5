@@ -1,7 +1,6 @@
 """MCP server wrapping MetaTrader 4/5 build pipeline (compile, deploy, backtest, logs)."""
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 import time
@@ -14,10 +13,13 @@ from mcp.server.fastmcp import FastMCP
 from .paths import detect_layout, MT5Layout, list_terminal_origins, find_terminal_for_install
 from .parsers import (
     parse_compile_log,
+    parse_tester_journal_notes,
     parse_tester_report,
     read_text_auto,
+    write_text_preserving,
     iter_journal_lines,
 )
+from .workdir import workdir
 from . import analysis as _analysis
 from . import lint as _lint
 from . import formatting as _formatting
@@ -41,22 +43,70 @@ def layout() -> MT5Layout:
     return _layout_cache
 
 
-def _workdir(source: Path) -> Path:
-    """Return a hidden working directory for compile logs / smoke ini files.
+_workdir = workdir  # shared with smoke.py
+_spawned_pids = _smoke.spawned_pids  # terminals launched by this process
 
-    Resolution order:
-      1. `MT5_WORK_DIR` env var (absolute path)
-      2. `<source-parent>/.mt5tmp/`
 
-    Directory is created if missing. Add `.mt5tmp/` to `.gitignore` to keep it out of VCS.
+def reset_layout_cache() -> None:
+    """Forget the cached layout (tests and `select_terminal` use this)."""
+    global _layout_cache
+    _layout_cache = None
+
+
+def _ini_get(path: Path, section: str, key: str) -> Optional[str]:
+    """Return `key` from `[section]` of an ini file (any encoding), or None."""
+    current = ""
+    for raw in read_text_auto(path).splitlines():
+        line = raw.strip()
+        if not line or line.startswith(";") or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            current = line[1:-1]
+            continue
+        if current.lower() == section.lower() and "=" in line:
+            k, v = line.split("=", 1)
+            if k.strip().lower() == key.lower():
+                return v.split(";", 1)[0].strip()
+    return None
+
+
+def _report_path_from_ini(cfg: Path, L: MT5Layout, portable: bool = False) -> Optional[Path]:
+    """Where the terminal writes the report named by `Report=` in `cfg`.
+
+    MT5 resolves `Report=` relative to the *platform directory*: the terminal data
+    folder in normal mode, the install folder in /portable mode. It is not `Tester/`.
+    A missing extension means `.htm` for a single test and `.xml` for an optimisation.
     """
-    explicit = os.environ.get("MT5_WORK_DIR")
-    if explicit:
-        d = Path(explicit)
-    else:
-        d = source.parent / ".mt5tmp"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    name = _ini_get(cfg, "Tester", "Report")
+    if not name:
+        return None
+    optimization = (_ini_get(cfg, "Tester", "Optimization") or "0").strip() not in ("", "0")
+    rel = Path(name.strip('"').replace("\\", "/"))  # ini paths use backslashes; Path on POSIX would not split them
+    if not rel.suffix:
+        rel = rel.with_suffix(".xml" if optimization else ".htm")
+    base = L.install if portable else L.data
+    return rel if rel.is_absolute() else base / rel
+
+
+def _find_reports(L: MT5Layout, since: Optional[float] = None) -> list[Path]:
+    """Tester HTML reports, newest first, from every location the terminal writes to."""
+    candidates: list[Path] = []
+    for folder in (L.data, L.install):
+        if folder.exists():
+            candidates.extend(p for p in folder.glob("*.htm*") if p.is_file())
+    if L.tester_dir.exists():
+        candidates.extend(p for p in L.tester_dir.rglob("*.htm*") if p.is_file())
+    seen: set[str] = set()
+    unique = []
+    for p in candidates:
+        key = str(p.resolve())
+        if key not in seen:
+            seen.add(key)
+            unique.append(p)
+    if since is not None:
+        unique = [p for p in unique if p.stat().st_mtime >= since - 1]
+    unique.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return unique
 
 
 @mcp.tool()
@@ -83,31 +133,9 @@ def env_info() -> dict:
 @mcp.tool()
 def list_terminals() -> dict:
     """Enumerate all MetaTrader terminal data folders under %APPDATA%\\MetaQuotes\\Terminal."""
-    appdata = os.environ.get("APPDATA")
-    if not appdata:
-        return {"error": "APPDATA env not set"}
-    base = Path(appdata) / "MetaQuotes" / "Terminal"
-    if not base.exists():
-        return {"error": f"missing: {base}"}
-
-    terminals = []
-    for d in base.iterdir():
-        if not d.is_dir() or len(d.name) != 32:
-            continue
-        origin_file = d / "origin.txt"
-        origin = None
-        if origin_file.exists():
-            try:
-                raw = origin_file.read_bytes()
-                origin = (raw.decode("utf-16", errors="replace") if raw[:2] in (b"\xff\xfe", b"\xfe\xff")
-                          else raw.decode("utf-8", errors="replace")).strip()
-            except Exception:
-                pass
-        terminals.append({
-            "hash": d.name,
-            "origin": origin,
-            "data_dir": str(d),
-        })
+    terminals = list_terminal_origins()
+    if not terminals:
+        return {"count": 0, "terminals": [], "note": "APPDATA not set or no MetaQuotes\\Terminal folder found"}
     return {"count": len(terminals), "terminals": terminals}
 
 
@@ -123,7 +151,7 @@ def compile(
     Args:
         source: Absolute path to the source file.
         include: Optional MQL root override (parent of `Include/`). Defaults to terminal MQL root.
-        log_file: Optional explicit log path. Defaults to <source>.log.
+        log_file: Optional explicit log path. Defaults to `.mt5tmp/<stem>.compile.log` next to the source.
         timeout_sec: Subprocess timeout.
 
     Returns: returncode, structured `errors`/`warnings` lists, `result_errors`/`result_warnings`,
@@ -145,6 +173,7 @@ def compile(
         f"/include:{inc}",
         f"/log:{log_path}",
     ]
+    started = time.time()
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
         rc = proc.returncode
@@ -155,7 +184,8 @@ def compile(
         stdout = ""
         stderr = f"timeout after {timeout_sec}s: {e}"
 
-    parsed = {"errors": [], "warnings": [], "result_errors": None, "result_warnings": None, "ok": False}
+    parsed = {"errors": [], "warnings": [], "result_errors": None, "result_warnings": None,
+              "result_line_found": False, "ok": False}
     excerpt = ""
     if log_path.exists():
         try:
@@ -165,11 +195,23 @@ def compile(
         except Exception as e:
             excerpt = f"(log read failed: {e})"
 
+    # A binary is only produced for main programs; require it to be newer than this invocation
+    # so a stale .ex5 from an earlier build can never make a silent failure look like success.
+    binary: Optional[Path] = None
+    binary_fresh: Optional[bool] = None
+    if src.suffix.lower() in (".mq4", ".mq5"):
+        binary = src.with_suffix(".ex5" if L.edition == "mt5" else ".ex4")
+        binary_fresh = binary.exists() and binary.stat().st_mtime >= started - 1
+    ok = bool(parsed["ok"] and (binary_fresh if binary_fresh is not None else True))
+
     return {
         "returncode": rc,
         "cmd": " ".join(cmd),
         "log_path": str(log_path),
-        "ok": parsed["ok"],
+        "ok": ok,
+        "result_line_found": parsed["result_line_found"],
+        "binary_path": str(binary) if binary else None,
+        "binary_fresh": binary_fresh,
         "result_errors": parsed["result_errors"],
         "result_warnings": parsed["result_warnings"],
         "errors": parsed["errors"][:50],
@@ -210,38 +252,74 @@ def run_backtest(
 
     start = time.time()
     rc: Optional[int] = None
+    pid: Optional[int] = None
+    extra = ("/portable",) if portable else ()
     if wait:
-        try:
-            proc = subprocess.run(cmd, timeout=timeout_sec)
-            rc = proc.returncode
-        except subprocess.TimeoutExpired:
+        rc, pid = _smoke.run_terminal(L.terminal, cfg, timeout_sec, extra_args=extra)
+        if rc is None:
             rc = -1
     else:
-        subprocess.Popen(cmd)
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        pid = proc.pid
+        _spawned_pids.add(pid)
 
     elapsed = round(time.time() - start, 2)
     latest_log = None
+    journal: dict = {"notes": {}, "warnings": []}
     if L.tester_logs.exists():
-        logs = sorted(L.tester_logs.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+        logs = [p for p in L.tester_logs.glob("*.log") if p.stat().st_mtime >= start - 1]
+        logs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         if logs:
             latest_log = str(logs[0])
+            try:
+                journal = parse_tester_journal_notes(read_text_auto(logs[0]))
+            except Exception as e:  # pragma: no cover
+                journal = {"notes": {}, "warnings": [f"journal parse failed: {e}"]}
+
+    expected_report = _report_path_from_ini(cfg, L, portable=portable)
+    report_path = None
+    if expected_report is not None and expected_report.exists() and expected_report.stat().st_mtime >= start - 1:
+        report_path = str(expected_report)
+    elif wait:
+        fresh = _find_reports(L, since=start)
+        report_path = str(fresh[0]) if fresh else None
 
     return {
         "returncode": rc,
+        "pid": pid,
         "elapsed_sec": elapsed,
         "cmd": " ".join(cmd),
         "latest_tester_log": latest_log,
+        "expected_report": str(expected_report) if expected_report else None,
+        "report_path": report_path,
+        "journal_notes": journal["notes"],
+        "warnings": journal["warnings"],
     }
 
 
 @mcp.tool()
-def kill_terminal() -> dict:
-    """Force-kill all running terminal processes for the configured edition."""
+def kill_terminal(all_instances: bool = False) -> dict:
+    """Force-kill terminal processes launched by this server (run_backtest / smoke_test).
+
+    By default only PIDs this server started are killed, so a live-trading terminal on the
+    same machine is never touched. Pass `all_instances=True` to `taskkill` every
+    terminal64.exe/terminal.exe of the configured edition (destructive).
+    """
     L = layout()
-    target = L.terminal.name
+    results = []
     try:
-        proc = subprocess.run(["taskkill", "/F", "/IM", target], capture_output=True, text=True)
-        return {"returncode": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr}
+        if _spawned_pids and not all_instances:
+            for pid in sorted(_spawned_pids):
+                proc = subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True, text=True)
+                results.append({"pid": pid, "returncode": proc.returncode, "stdout": proc.stdout.strip()})
+            _spawned_pids.clear()
+            return {"killed": results, "scope": "spawned_by_server"}
+        if not all_instances:
+            return {"killed": [], "scope": "spawned_by_server",
+                    "note": "no terminal launched by this server is running; pass all_instances=True to kill every instance"}
+        proc = subprocess.run(["taskkill", "/F", "/IM", L.terminal.name], capture_output=True, text=True)
+        _spawned_pids.clear()
+        return {"returncode": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr, "scope": "all_instances"}
     except Exception as e:
         return {"error": str(e)}
 
@@ -324,9 +402,11 @@ def install_include(source: str, target_name: Optional[str] = None) -> dict:
 
 
 @mcp.tool()
-def list_experts(pattern: str = "*.ex5", recurse: bool = True) -> dict:
-    """List compiled EAs in Experts/."""
+def list_experts(pattern: Optional[str] = None, recurse: bool = True) -> dict:
+    """List compiled EAs in Experts/ (defaults to *.ex5 for MT5, *.ex4 for MT4)."""
     L = layout()
+    if not pattern:
+        pattern = "*.ex5" if L.edition == "mt5" else "*.ex4"
     if not L.experts_dir.exists():
         return {"error": f"Experts dir missing: {L.experts_dir}"}
     glob = L.experts_dir.rglob if recurse else L.experts_dir.glob
@@ -338,34 +418,36 @@ def list_experts(pattern: str = "*.ex5", recurse: bool = True) -> dict:
 
 
 @mcp.tool()
-def read_tester_report(path: Optional[str] = None, raw_truncate: int = 50000) -> dict:
-    """Locate and parse latest MT5 tester HTML report.
+def read_tester_report(path: Optional[str] = None, raw_truncate: int = 50000,
+                       max_trades: int = 500) -> dict:
+    """Locate and parse the latest MT5 tester HTML report.
 
     Args:
-        path: Explicit report path. If omitted, find latest *.htm under Tester/.
+        path: Explicit report path. If omitted, the newest *.htm in the terminal data folder
+              root (where `Report=` is written), the install dir (/portable) and Tester/ is used.
         raw_truncate: Max chars of raw HTML returned.
+        max_trades: Max trade rows returned in `trades` (all rows are parsed).
     """
     L = layout()
     if path:
         p = Path(path)
     else:
-        if not L.tester_dir.exists():
-            return {"error": f"tester dir missing: {L.tester_dir}"}
-        reports = sorted(L.tester_dir.rglob("*.htm*"), key=lambda x: x.stat().st_mtime, reverse=True)
+        reports = _find_reports(L)
         if not reports:
-            return {"error": "no tester reports"}
+            return {"error": "no tester reports found in data folder, install dir or Tester/"}
         p = reports[0]
 
     if not p.exists():
         return {"error": f"report not found: {p}"}
     html = read_text_auto(p)
-    parsed = parse_tester_report(html)
+    parsed = parse_tester_report(html, max_trades=max_trades)
     return {
         "path": str(p),
         "size": len(html),
         "summary": parsed["summary"],
         "trade_rows_detected": parsed["trade_rows_detected"],
         "trades_sample": parsed["trades_sample"],
+        "trades": parsed["trades"],
         "raw_truncated": html[:raw_truncate],
     }
 
@@ -384,7 +466,7 @@ def patch_tester_ini(config: str, updates: dict) -> dict:
     if not p.exists():
         return {"error": f"config not found: {p}"}
 
-    lines = p.read_text(encoding="utf-8").splitlines()
+    lines = read_text_auto(p).splitlines()
     applied: list[str] = []
     skipped: list[str] = []
     section_keys: dict[str, dict[str, str]] = {}
@@ -438,8 +520,8 @@ def patch_tester_ini(config: str, updates: dict) -> dict:
             out.append(f"{k}={v}")
             applied.append(f"{sec}.{k}")
 
-    p.write_text("\n".join(out) + "\n", encoding="utf-8")
-    return {"applied": applied, "skipped": skipped, "config": str(p)}
+    encoding = write_text_preserving(p, "\n".join(out) + "\n")
+    return {"applied": applied, "skipped": skipped, "config": str(p), "encoding": encoding}
 
 
 @mcp.tool()
@@ -480,12 +562,12 @@ def gen_tester_inputs(source: str, write_to: Optional[str] = None) -> dict:
     if write_to:
         target = Path(write_to)
         if target.exists():
-            text = target.read_text(encoding="utf-8")
+            text = read_text_auto(target)
             if "[TesterInputs]" in text:
                 head = text.split("[TesterInputs]", 1)[0].rstrip()
-                target.write_text(head + "\n\n" + block, encoding="utf-8")
+                write_text_preserving(target, head + "\n\n" + block)
             else:
-                target.write_text(text.rstrip() + "\n\n" + block, encoding="utf-8")
+                write_text_preserving(target, text.rstrip() + "\n\n" + block)
             out["written_to"] = str(target)
     return out
 
@@ -617,25 +699,46 @@ def rename_symbol(old: str, new: str, root: str, dry_run: bool = True) -> dict:
 # Optimization
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
-def parse_optimization(path: Optional[str] = None) -> dict:
-    """Parse the latest `.opt` file in the Tester folder, or one given by `path`."""
+def _load_opt(path: Optional[str], expert: Optional[str], symbol: Optional[str],
+              period: Optional[str]) -> dict:
     L = layout()
-    target = path or _optimization.find_latest_opt(L.tester_dir)
+    target = path or _optimization.find_latest_opt(L.tester_dir, expert=expert, symbol=symbol, period=period)
     if not target:
-        return {"error": "no .opt file found"}
+        return {"error": "no matching .opt file found under Tester/ (caches auto-delete after 30 days unused)"}
     return _optimization.parse_opt_file(target)
 
 
 @mcp.tool()
+def parse_optimization(path: Optional[str] = None, expert: Optional[str] = None,
+                       symbol: Optional[str] = None, period: Optional[str] = None,
+                       sample: int = 50) -> dict:
+    """Parse an MT5 `.opt` optimisation cache (header, inputs, pass count, first `sample` passes).
+
+    Without `path`, the newest cache under Tester/ is used; pass `expert`/`symbol`/`period`
+    to select deterministically by the documented filename schema. Use `top_passes` for ranking
+    over the complete pass list.
+    """
+    parsed = _load_opt(path, expert, symbol, period)
+    passes = parsed.pop("passes", None)
+    if passes is not None:
+        parsed["passes_sample"] = passes[:sample]
+    return parsed
+
+
+@mcp.tool()
 def top_passes(opt_path: Optional[str] = None, criterion: str = "profit",
-               n: int = 10, descending: bool = True) -> dict:
-    """Sort optimization passes by criterion and return the top N."""
-    parsed = parse_optimization(opt_path)
-    passes = parsed.get("passes_sample") or []
+               n: int = 10, descending: bool = True, expert: Optional[str] = None,
+               symbol: Optional[str] = None, period: Optional[str] = None) -> dict:
+    """Sort *all* optimization passes by criterion and return the top N."""
+    parsed = _load_opt(opt_path, expert, symbol, period)
+    passes = parsed.get("passes") or []
+    if not passes:
+        return {"error": parsed.get("error", "no passes parsed"), "path": parsed.get("path")}
     return {
+        "path": parsed.get("path"),
         "criterion": criterion,
         "n": n,
+        "pass_count": len(passes),
         "top": _optimization.top_passes(passes, criterion=criterion, n=n, descending=descending),
     }
 

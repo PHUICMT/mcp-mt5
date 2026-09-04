@@ -46,6 +46,7 @@ def test_compile_invokes_metaeditor(fake_layout, tmp_path):
     def fake_run(cmd, capture_output, text, timeout):
         log.parent.mkdir(parents=True, exist_ok=True)
         log.write_text("Result: 0 errors, 0 warnings, 50 ms elapsed\n", encoding="utf-8")
+        src.with_suffix(".ex5").write_bytes(b"MZ")  # MetaEditor emits the binary next to the source
 
         class R:
             returncode = 0

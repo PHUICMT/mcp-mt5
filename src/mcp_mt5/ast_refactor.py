@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from .parsers import read_text_auto
+from .parsers import read_text_auto, write_text_preserving
 from .analysis import _strip_comments_strings
 
 
@@ -102,7 +102,9 @@ def extract_function(
     indent_match = re.match(r"^[ \t]*", lines[line_start - 1])
     indent = indent_match.group(0) if indent_match else ""
 
-    above_text = "\n".join(lines[: line_start - 1])
+    # Only declarations inside the enclosing function (before the block) can be parameters;
+    # globals and other functions' locals must not leak into the signature.
+    above_text = "\n".join(lines[enclosing["line_start"] - 1 : line_start - 1])
     typed_params = _gather_referenced_locals(block, above_text)
     typed_params = sorted(set(typed_params))[:10]
     param_list = ", ".join(typed_params)
@@ -123,9 +125,9 @@ def extract_function(
     if target_file:
         target = Path(target_file)
         if not dry_run:
-            existing = target.read_text(encoding="utf-8") if target.exists() else ""
-            target.write_text(existing.rstrip() + "\n\n" + helper_block, encoding="utf-8")
-            src.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+            existing = read_text_auto(target) if target.exists() else ""
+            write_text_preserving(target, existing.rstrip() + "\n\n" + helper_block)
+            write_text_preserving(src, "\n".join(new_lines) + "\n")
         return {
             "mode": "external",
             "target_file": str(target),
@@ -140,7 +142,7 @@ def extract_function(
     out = new_lines[:insert_at] + helper_block.splitlines() + new_lines[insert_at:]
 
     if not dry_run:
-        src.write_text("\n".join(out) + "\n", encoding="utf-8")
+        write_text_preserving(src, "\n".join(out) + "\n")
 
     return {
         "mode": "inline",

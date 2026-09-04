@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from .parsers import read_text_auto
+from .parsers import read_text_auto, write_text_preserving
 
 
 def rename_symbol(old: str, new: str, root: str | Path,
@@ -28,7 +28,7 @@ def rename_symbol(old: str, new: str, root: str | Path,
                 continue
             changes.append({"file": str(f), "replacements": count})
             if not dry_run:
-                f.write_text(new_text, encoding="utf-8")
+                write_text_preserving(f, new_text)
     return {
         "old": old,
         "new": new,

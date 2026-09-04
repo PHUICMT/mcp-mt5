@@ -27,7 +27,7 @@ For runtime trading, pair this with a live-trading MCP — they target different
 
 ## Tools
 
-The server exposes 32 tools and 3 MCP resources across nine categories.
+The server exposes 35 tools and 3 MCP resources across nine categories.
 
 ### 🔍 Discovery & terminal selection
 
@@ -73,7 +73,7 @@ The server exposes 32 tools and 3 MCP resources across nine categories.
 
 | Tool | Description |
 |------|-------------|
-| `format_mql` | Format a source file via `clang-format` (treats MQL as C++ with an MQL-friendly default style) |
+| `format_mql` | Format a source file via `clang-format` (MQL literals such as `D'…'`/`C'…'` and `input group` lines are protected). Dry run unless `write=true` |
 | `format_check` | Same as above but reports whether changes are needed without writing the file |
 
 ### ✏️ Refactor
@@ -94,7 +94,7 @@ The server exposes 32 tools and 3 MCP resources across nine categories.
 | `read_tester_report` | Locate and parse the latest tester HTML report into a structured `summary` (net profit, profit factor, drawdown, trade counts, etc.) plus a sample of trade rows |
 | `compare_reports` | Diff two tester reports key-by-key with absolute and percent deltas |
 | `regression_check` | Verify a candidate report stays within guard thresholds vs a baseline (e.g. "net_profit may not drop more than 5%") |
-| `kill_terminal` | `taskkill` if the terminal hangs |
+| `kill_terminal` | Kill terminals launched by this server (or every instance with `all_instances=true`) |
 
 ### 📝 Logs & snapshots
 
@@ -243,7 +243,7 @@ A more complete sample lives at [`examples/tester.ini`](examples/tester.ini).
 git clone https://github.com/PHUICMT/mcp-mt5
 cd mcp-mt5
 pip install -e ".[dev]"
-pytest                    # runs the 18-test suite
+pytest                    # runs the test suite (no MetaTrader needed)
 ruff check src tests      # lints
 ```
 
@@ -256,8 +256,11 @@ mcp-mt5/
 ├── src/mcp_mt5/
 │   ├── server.py        # FastMCP tool definitions
 │   ├── paths.py         # Layout detection + origin.txt scan
-│   └── parsers.py       # Compile log + tester HTML report parsers
-├── tests/               # 18 pytest tests, no live MT5 required
+│   ├── parsers.py       # Compile log, tester report/journal parsers, encoding helpers
+│   ├── analysis.py, lint.py, formatting.py, refactor.py, ast_refactor.py
+│   ├── optimization.py  # .opt cache reader (documented TesterOptCache layout)
+│   ├── reports.py, snapshot.py, smoke.py, workdir.py
+├── tests/               # pytest suite, no live MT5 required
 ├── examples/            # Sample tester.ini + client config
 └── .github/workflows/   # CI + PyPI release
 ```
@@ -269,7 +272,7 @@ mcp-mt5/
 - **Windows-only.** MetaTrader CLI binaries don't ship for Linux/macOS. Wine ports may work but are untested.
 - **No live broker access.** This server intentionally never authenticates to a broker. Use a separate MCP server for runtime trading.
 - **Tester report parsing is best-effort.** MetaTrader's HTML output isn't a stable schema; the raw HTML is also returned alongside the parsed structure so you can fall back to text inspection when needed.
-- **Optimization runs are not parsed yet.** Single-pass backtests are fully supported; `.opt` results are on the roadmap.
+- **Optimisation caches (`Tester/cache/*.opt`) are parsed with the layout MetaQuotes published in *MQL5 Programming for Traders*.** Files with an unrecognised record layout are reported as such rather than guessed.
 
 ---
 

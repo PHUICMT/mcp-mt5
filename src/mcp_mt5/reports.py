@@ -1,18 +1,26 @@
 """Backtest report comparison + regression detection."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from .parsers import parse_tester_report, read_text_auto
 
 
+_NUM_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
+
+
 def _to_float(s: str | None) -> float | None:
+    """Parse the first number in a report cell.
+
+    MT5 prints thousands with a space ("10 000.00"), MT4 with none, some locales with a
+    comma; composite cells such as "132 (43.85%)" yield the leading number (the count).
+    """
     if s is None:
         return None
-    try:
-        return float(s.replace(",", "").replace("%", "").strip())
-    except (ValueError, AttributeError):
-        return None
+    cleaned = re.sub(r"[\s\u00a0\u2009,]", "", str(s))
+    m = _NUM_RE.search(cleaned)
+    return float(m.group(0)) if m else None
 
 
 def compare_reports(baseline: str | Path, candidate: str | Path) -> dict:

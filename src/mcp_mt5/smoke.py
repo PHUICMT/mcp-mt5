@@ -1,22 +1,19 @@
 """Smoke test: compile + 1-day backtest + journal error scan."""
 from __future__ import annotations
 
-import os
 import re
+import shutil
 import subprocess
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-from .parsers import read_text_auto
+from .parsers import parse_compile_log, parse_tester_journal_notes, read_text_auto
+from .workdir import workdir
 
-
-def _workdir(source: Path) -> Path:
-    explicit = os.environ.get("MT5_WORK_DIR")
-    d = Path(explicit) if explicit else (source.parent / ".mt5tmp")
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+# PIDs of terminals launched by this module, so `kill_terminal` can target them precisely.
+spawned_pids: set[int] = set()
 
 
 _RUNTIME_ERROR_PATTERNS = [
@@ -66,8 +63,12 @@ Deposit={deposit}
 Currency=USD
 Leverage={leverage}
 ExecutionMode=0
+UseLocal=1
+UseRemote=0
+UseCloud=0
 Visual=0
 ShutdownTerminal=1
+ReplaceReport=1
 Report=smoke_report
 
 [TesterInputs]
@@ -92,6 +93,28 @@ def scan_journal_for_errors(log_path: Path) -> dict:
     return {"matches": matches, "match_count": len(matches), "log_path": str(log_path)}
 
 
+def run_terminal(terminal: Path, config: Path, timeout_sec: int,
+                 extra_args: tuple[str, ...] = ()) -> tuple[Optional[int], int]:
+    """Launch `terminal /config:<ini>` with stdout/stderr detached (stdio transport safety).
+
+    Returns (returncode or None on timeout, pid).
+    """
+    proc = subprocess.Popen(
+        [str(terminal), f"/config:{config}", *extra_args],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    spawned_pids.add(proc.pid)
+    try:
+        rc = proc.wait(timeout=timeout_sec)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        rc = None
+    finally:
+        spawned_pids.discard(proc.pid)
+    return rc, proc.pid
+
+
 def run_smoke(
     layout,
     source: str | Path,
@@ -103,41 +126,45 @@ def run_smoke(
 ) -> dict:
     """End-to-end smoke harness.
 
-    1. Compile the source.
+    1. Compile the source (success = `Result:` line with 0 errors AND a fresh binary).
     2. Deploy the binary.
     3. Write a 1-day headless `tester.ini`.
     4. Launch the terminal and wait for shutdown.
     5. Scan the resulting tester journal for runtime errors.
-
-    Returns a `pass`/`fail` summary plus the full sub-results so the caller can drill in.
     """
     src = Path(source)
     if not src.exists():
         return {"ok": False, "stage": "input", "error": f"source not found: {src}"}
 
     # 1. Compile
-    work = _workdir(src)
+    work = workdir(src)
     log_path = work / f"{src.stem}.smoke.compile.log"
-    cmd = [str(layout.metaeditor), f"/compile:{src}", f"/include:{layout.mql_root}",
-           f"/log:{log_path}"]
+    cmd = [str(layout.metaeditor), f"/compile:{src}", f"/include:{layout.mql_root}", f"/log:{log_path}"]
+    started = time.time()
     try:
-        subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
     except subprocess.TimeoutExpired:
         return {"ok": False, "stage": "compile", "error": "compile timeout"}
 
-    if log_path.exists():
-        compile_text = read_text_auto(log_path)
-        if "0 errors" not in compile_text and "Result: 0 errors" not in compile_text:
-            tail = "\n".join(compile_text.splitlines()[-30:])
-            return {"ok": False, "stage": "compile", "log_excerpt": tail}
-
-    # 2. Deploy
+    compile_text = read_text_auto(log_path) if log_path.exists() else ""
+    parsed = parse_compile_log(compile_text)
     ext = ".ex5" if layout.edition == "mt5" else ".ex4"
     binary = src.with_suffix(ext)
-    if not binary.exists():
-        return {"ok": False, "stage": "compile", "error": f"binary missing: {binary}"}
+    binary_fresh = binary.exists() and binary.stat().st_mtime >= started - 1
+    if not parsed["ok"] or not binary_fresh:
+        return {
+            "ok": False,
+            "stage": "compile",
+            "error": ("binary missing or stale" if parsed["ok"] else
+                      f"{parsed['result_errors']} compile errors" if parsed["result_line_found"] else
+                      "no 'Result:' line in compile log (MetaEditor silent failure)"),
+            "errors": parsed["errors"][:20],
+            "log_excerpt": "\n".join(compile_text.splitlines()[-30:]),
+        }
+
+    # 2. Deploy
     target = layout.experts_dir / binary.name
-    target.write_bytes(binary.read_bytes())
+    shutil.copy2(binary, target)
 
     # 3. tester.ini
     ea_name = expert_name or binary.stem
@@ -146,27 +173,26 @@ def run_smoke(
 
     # 4. Run terminal
     start = time.time()
-    try:
-        subprocess.run([str(layout.terminal), f"/config:{cfg}"], timeout=timeout_sec)
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "stage": "backtest", "error": f"terminal timeout after {timeout_sec}s"}
+    rc, _pid = run_terminal(layout.terminal, cfg, timeout_sec)
     elapsed = round(time.time() - start, 2)
+    if rc is None:
+        return {"ok": False, "stage": "backtest", "error": f"terminal timeout after {timeout_sec}s"}
 
-    # 5. Scan journal
+    # 5. Scan journal (only logs written by this run)
     journal = None
     if layout.tester_logs.exists():
-        logs = sorted(layout.tester_logs.glob("*.log"),
-                      key=lambda p: p.stat().st_mtime, reverse=True)
+        logs = [p for p in layout.tester_logs.glob("*.log") if p.stat().st_mtime >= start - 1]
+        logs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         if logs:
             journal = logs[0]
 
     if not journal:
-        return {"ok": False, "stage": "journal", "error": "no tester log produced",
-                "elapsed_sec": elapsed}
+        return {"ok": False, "stage": "journal", "error": "no tester log produced", "elapsed_sec": elapsed}
 
     scan = scan_journal_for_errors(journal)
+    notes = parse_tester_journal_notes(read_text_auto(journal))
     return {
-        "ok": scan["match_count"] == 0,
+        "ok": scan["match_count"] == 0 and not notes["warnings"],
         "stage": "complete",
         "elapsed_sec": elapsed,
         "expert": ea_name,
@@ -174,4 +200,6 @@ def run_smoke(
         "tester_log": str(journal),
         "errors_found": scan["match_count"],
         "errors_sample": scan["matches"][:20],
+        "journal_notes": notes["notes"],
+        "warnings": notes["warnings"],
     }
