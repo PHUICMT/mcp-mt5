@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 
 from mcp_mt5 import server
 from mcp_mt5.paths import MT5Layout
@@ -34,8 +35,8 @@ def test_env_info(fake_layout):
 
 
 def test_compile_missing_source(fake_layout):
-    out = server.compile("/no/such/file.mq5")
-    assert "source not found" in out["error"]
+    with pytest.raises(ToolError, match="source not found"):
+        server.compile("/no/such/file.mq5")
 
 
 def test_compile_invokes_metaeditor(fake_layout, tmp_path):
@@ -63,8 +64,8 @@ def test_compile_invokes_metaeditor(fake_layout, tmp_path):
 
 
 def test_run_backtest_missing_config(fake_layout):
-    out = server.run_backtest("/no/cfg.ini")
-    assert "config not found" in out["error"]
+    with pytest.raises(ToolError, match="config not found"):
+        server.run_backtest("/no/cfg.ini")
 
 
 def test_deploy_ea_copies(fake_layout, tmp_path):

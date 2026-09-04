@@ -6,9 +6,11 @@ import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
+from mcp.types import ToolAnnotations
 
 from .paths import detect_layout, MT5Layout, list_terminal_origins, find_terminal_for_install
 from .parsers import (
@@ -30,7 +32,39 @@ from . import snapshot as _snapshot
 from . import smoke as _smoke
 from . import ast_refactor as _ast_refactor
 
-mcp = FastMCP("mt5")
+_INSTRUCTIONS = """\
+MetaTrader 4/5 build-and-test harness. It drives MetaEditor64.exe and terminal64.exe on this
+Windows machine; it never connects to a broker or places live orders.
+
+Typical loop: env_info -> compile (or compile_and_deploy) -> patch_tester_ini -> run_backtest
+-> read_tester_report -> compare_reports / regression_check -> edit source -> repeat.
+smoke_test does compile + deploy + 1-day backtest + journal scan in one call.
+
+Rules:
+- Every path argument must be an absolute Windows path (e.g. C:\\Users\\me\\EA\\MyEA.mq5).
+- Tools that modify files default to a dry run (rename_symbol, extract_function, format_mql);
+  pass dry_run=false / write=true to apply.
+- run_backtest blocks until the terminal exits; needs ShutdownTerminal=1 in the ini and can take
+  5-30 minutes. A backtest is only comparable to another if journal_notes shows no
+  start_time_changed warning.
+- A failed compile, missing file or bad argument is reported as a tool error; a backtest that
+  completes with poor results is a normal result.
+"""
+
+mcp = FastMCP("mt5", instructions=_INSTRUCTIONS)
+
+# Tool annotation presets (hints for the client; never a security boundary).
+_RO = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
+_RUN = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False)
+_WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)
+_DESTRUCTIVE = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False)
+
+
+def _raise_if_error(result: dict) -> dict[str, Any]:
+    """Turn a module-level `{"error": ...}` result into a tool error the client can see."""
+    if isinstance(result, dict) and result.get("error") and result.get("ok") is not True:
+        raise ToolError(str(result["error"]))
+    return result
 
 # Layout resolved lazily so tests can override env first
 _layout_cache: Optional[MT5Layout] = None
@@ -109,8 +143,8 @@ def _find_reports(L: MT5Layout, since: Optional[float] = None) -> list[Path]:
     return unique
 
 
-@mcp.tool()
-def env_info() -> dict:
+@mcp.tool(annotations=_RO)
+def env_info() -> dict[str, Any]:
     """Resolve and report MT4/5 paths, terminal hash, and missing-component issues."""
     L = layout()
     return {
@@ -130,8 +164,8 @@ def env_info() -> dict:
     }
 
 
-@mcp.tool()
-def list_terminals() -> dict:
+@mcp.tool(annotations=_RO)
+def list_terminals() -> dict[str, Any]:
     """Enumerate all MetaTrader terminal data folders under %APPDATA%\\MetaQuotes\\Terminal."""
     terminals = list_terminal_origins()
     if not terminals:
@@ -139,13 +173,13 @@ def list_terminals() -> dict:
     return {"count": len(terminals), "terminals": terminals}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RUN)
 def compile(
     source: str,
     include: Optional[str] = None,
     log_file: Optional[str] = None,
     timeout_sec: int = 300,
-) -> dict:
+) -> dict[str, Any]:
     """Compile a .mq4/.mq5/.mqh source via MetaEditor CLI.
 
     Args:
@@ -160,9 +194,9 @@ def compile(
     L = layout()
     src = Path(source)
     if not src.exists():
-        return {"error": f"source not found: {src}"}
+        raise ToolError(f"source not found: {src}")
     if not L.metaeditor.exists():
-        return {"error": f"MetaEditor missing: {L.metaeditor}"}
+        raise ToolError(f"MetaEditor missing: {L.metaeditor}")
 
     inc = Path(include) if include else L.mql_root
     log_path = Path(log_file) if log_file else (_workdir(src) / f"{src.stem}.compile.log")
@@ -222,13 +256,13 @@ def compile(
     }
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RUN)
 def run_backtest(
     config: str,
     wait: bool = True,
     timeout_sec: int = 1800,
     portable: bool = False,
-) -> dict:
+) -> dict[str, Any]:
     """Launch terminal with /config:<tester.ini>.
 
     Args:
@@ -242,9 +276,9 @@ def run_backtest(
     L = layout()
     cfg = Path(config)
     if not cfg.exists():
-        return {"error": f"config not found: {cfg}"}
+        raise ToolError(f"config not found: {cfg}")
     if not L.terminal.exists():
-        return {"error": f"terminal missing: {L.terminal}"}
+        raise ToolError(f"terminal missing: {L.terminal}")
 
     cmd = [str(L.terminal), f"/config:{cfg}"]
     if portable:
@@ -297,8 +331,8 @@ def run_backtest(
     }
 
 
-@mcp.tool()
-def kill_terminal(all_instances: bool = False) -> dict:
+@mcp.tool(annotations=_DESTRUCTIVE)
+def kill_terminal(all_instances: bool = False) -> dict[str, Any]:
     """Force-kill terminal processes launched by this server (run_backtest / smoke_test).
 
     By default only PIDs this server started are killed, so a live-trading terminal on the
@@ -321,12 +355,12 @@ def kill_terminal(all_instances: bool = False) -> dict:
         _spawned_pids.clear()
         return {"returncode": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr, "scope": "all_instances"}
     except Exception as e:
-        return {"error": str(e)}
+        raise ToolError(str(e))
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 def tail_log(mode: str = "live", lines: int = 100, date: Optional[str] = None,
-             structured: bool = False) -> dict:
+             structured: bool = False) -> dict[str, Any]:
     """Read last N lines from terminal logs.
 
     Args:
@@ -343,16 +377,16 @@ def tail_log(mode: str = "live", lines: int = 100, date: Optional[str] = None,
         path = L.logs_dir / f"{d}.log"
     elif mode == "tester":
         if not L.tester_logs.exists():
-            return {"error": f"tester logs dir missing: {L.tester_logs}"}
+            raise ToolError(f"tester logs dir missing: {L.tester_logs}")
         files = sorted(L.tester_logs.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
         if not files:
-            return {"error": "no tester logs"}
+            raise ToolError("no tester logs")
         path = files[0]
     else:
-        return {"error": f"unknown mode: {mode}"}
+        raise ToolError(f"unknown mode: {mode}")
 
     if not path.exists():
-        return {"error": f"log not found: {path}", "path": str(path)}
+        raise ToolError(f"log not found: {path}")
 
     text = read_text_auto(path)
     tail_lines = text.splitlines()[-lines:]
@@ -364,8 +398,8 @@ def tail_log(mode: str = "live", lines: int = 100, date: Optional[str] = None,
     return out
 
 
-@mcp.tool()
-def deploy_ea(source_ex: str, name: Optional[str] = None) -> dict:
+@mcp.tool(annotations=_DESTRUCTIVE)
+def deploy_ea(source_ex: str, name: Optional[str] = None) -> dict[str, Any]:
     """Copy compiled .ex4/.ex5 binary into Experts/.
 
     Args:
@@ -375,16 +409,16 @@ def deploy_ea(source_ex: str, name: Optional[str] = None) -> dict:
     L = layout()
     src = Path(source_ex)
     if not src.exists():
-        return {"error": f"binary not found: {src}"}
+        raise ToolError(f"binary not found: {src}")
     if not L.experts_dir.exists():
-        return {"error": f"Experts dir missing: {L.experts_dir}"}
+        raise ToolError(f"Experts dir missing: {L.experts_dir}")
     target = L.experts_dir / (name or src.name)
     shutil.copy2(src, target)
     return {"copied_to": str(target), "size": target.stat().st_size}
 
 
-@mcp.tool()
-def install_include(source: str, target_name: Optional[str] = None) -> dict:
+@mcp.tool(annotations=_DESTRUCTIVE)
+def install_include(source: str, target_name: Optional[str] = None) -> dict[str, Any]:
     """Copy a .mqh into the terminal Include folder (e.g. for LiveLog.mqh).
 
     Args:
@@ -394,21 +428,21 @@ def install_include(source: str, target_name: Optional[str] = None) -> dict:
     L = layout()
     src = Path(source)
     if not src.exists():
-        return {"error": f"source not found: {src}"}
+        raise ToolError(f"source not found: {src}")
     L.include_dir.mkdir(parents=True, exist_ok=True)
     target = L.include_dir / (target_name or src.name)
     shutil.copy2(src, target)
     return {"copied_to": str(target)}
 
 
-@mcp.tool()
-def list_experts(pattern: Optional[str] = None, recurse: bool = True) -> dict:
+@mcp.tool(annotations=_RO)
+def list_experts(pattern: Optional[str] = None, recurse: bool = True) -> dict[str, Any]:
     """List compiled EAs in Experts/ (defaults to *.ex5 for MT5, *.ex4 for MT4)."""
     L = layout()
     if not pattern:
         pattern = "*.ex5" if L.edition == "mt5" else "*.ex4"
     if not L.experts_dir.exists():
-        return {"error": f"Experts dir missing: {L.experts_dir}"}
+        raise ToolError(f"Experts dir missing: {L.experts_dir}")
     glob = L.experts_dir.rglob if recurse else L.experts_dir.glob
     files = [{"name": p.name, "rel": str(p.relative_to(L.experts_dir)),
               "size": p.stat().st_size,
@@ -417,9 +451,9 @@ def list_experts(pattern: Optional[str] = None, recurse: bool = True) -> dict:
     return {"count": len(files), "files": files[:200]}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 def read_tester_report(path: Optional[str] = None, raw_truncate: int = 50000,
-                       max_trades: int = 500) -> dict:
+                       max_trades: int = 500) -> dict[str, Any]:
     """Locate and parse the latest MT5 tester HTML report.
 
     Args:
@@ -434,11 +468,11 @@ def read_tester_report(path: Optional[str] = None, raw_truncate: int = 50000,
     else:
         reports = _find_reports(L)
         if not reports:
-            return {"error": "no tester reports found in data folder, install dir or Tester/"}
+            raise ToolError("no tester reports found in data folder, install dir or Tester/")
         p = reports[0]
 
     if not p.exists():
-        return {"error": f"report not found: {p}"}
+        raise ToolError(f"report not found: {p}")
     html = read_text_auto(p)
     parsed = parse_tester_report(html, max_trades=max_trades)
     return {
@@ -452,8 +486,8 @@ def read_tester_report(path: Optional[str] = None, raw_truncate: int = 50000,
     }
 
 
-@mcp.tool()
-def patch_tester_ini(config: str, updates: dict) -> dict:
+@mcp.tool(annotations=_DESTRUCTIVE)
+def patch_tester_ini(config: str, updates: dict) -> dict[str, Any]:
     """Update fields in a tester.ini file in-place.
 
     Args:
@@ -464,7 +498,7 @@ def patch_tester_ini(config: str, updates: dict) -> dict:
     """
     p = Path(config)
     if not p.exists():
-        return {"error": f"config not found: {p}"}
+        raise ToolError(f"config not found: {p}")
 
     lines = read_text_auto(p).splitlines()
     applied: list[str] = []
@@ -524,8 +558,8 @@ def patch_tester_ini(config: str, updates: dict) -> dict:
     return {"applied": applied, "skipped": skipped, "config": str(p), "encoding": encoding}
 
 
-@mcp.tool()
-def compile_and_deploy(source: str, ea_name: Optional[str] = None) -> dict:
+@mcp.tool(annotations=_DESTRUCTIVE)
+def compile_and_deploy(source: str, ea_name: Optional[str] = None) -> dict[str, Any]:
     """Compile then deploy resulting .ex5/.ex4 to Experts/ in one shot."""
     res = compile(source)
     if not res.get("ok"):
@@ -545,14 +579,14 @@ def compile_and_deploy(source: str, ea_name: Optional[str] = None) -> dict:
 # Source analysis
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
-def extract_inputs(source: str) -> dict:
+@mcp.tool(annotations=_RO)
+def extract_inputs(source: str) -> dict[str, Any]:
     """Parse `input <type> <name> = <default>;` declarations from a source file."""
     return {"file": source, "inputs": _analysis.extract_inputs(source)}
 
 
-@mcp.tool()
-def gen_tester_inputs(source: str, write_to: Optional[str] = None) -> dict:
+@mcp.tool(annotations=_DESTRUCTIVE)
+def gen_tester_inputs(source: str, write_to: Optional[str] = None) -> dict[str, Any]:
     """Generate a `[TesterInputs]` block from EA inputs.
 
     If `write_to` points at a tester.ini, the block is appended/replaced in-place.
@@ -572,16 +606,16 @@ def gen_tester_inputs(source: str, write_to: Optional[str] = None) -> dict:
     return out
 
 
-@mcp.tool()
-def resolve_includes(source: str, mql_root: Optional[str] = None) -> dict:
+@mcp.tool(annotations=_RO)
+def resolve_includes(source: str, mql_root: Optional[str] = None) -> dict[str, Any]:
     """Recursively resolve `#include` directives. Reports unresolved files."""
     L = layout()
     return _analysis.resolve_includes(source, mql_root or str(L.mql_root))
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 def find_symbol(symbol: str, root: str, exts: Optional[list[str]] = None,
-                limit: int = 200) -> dict:
+                limit: int = 200) -> dict[str, Any]:
     """Grep a symbol across MQL files, skipping comments and string literals."""
     matches = _analysis.find_symbol(
         symbol, root,
@@ -591,24 +625,24 @@ def find_symbol(symbol: str, root: str, exts: Optional[list[str]] = None,
     return {"symbol": symbol, "root": root, "match_count": len(matches), "matches": matches}
 
 
-@mcp.tool()
-def code_metrics(source: Optional[str] = None, root: Optional[str] = None) -> dict:
+@mcp.tool(annotations=_RO)
+def code_metrics(source: Optional[str] = None, root: Optional[str] = None) -> dict[str, Any]:
     """Compute LOC/function/nesting metrics for a file or every MQL file under a root."""
     if source:
-        return _analysis.code_metrics(source)
+        return _raise_if_error(_analysis.code_metrics(source))
     if root:
-        return _analysis.aggregate_metrics(root)
-    return {"error": "provide either source or root"}
+        return _raise_if_error(_analysis.aggregate_metrics(root))
+    raise ToolError("provide either source or root")
 
 
-@mcp.tool()
-def extract_doc(source: str) -> dict:
+@mcp.tool(annotations=_RO)
+def extract_doc(source: str) -> dict[str, Any]:
     """Extract MetaEditor `//+--+ //| ... +--+` doc blocks from a source file."""
     return {"file": source, "blocks": _analysis.extract_doc(source)}
 
 
-@mcp.tool()
-def find_magic_collision(root: str, var_pattern: str = "Magic") -> dict:
+@mcp.tool(annotations=_RO)
+def find_magic_collision(root: str, var_pattern: str = "Magic") -> dict[str, Any]:
     """Find duplicate magic-number assignments across the project."""
     return _analysis.find_magic_collision(root, var_pattern=var_pattern)
 
@@ -617,15 +651,15 @@ def find_magic_collision(root: str, var_pattern: str = "Magic") -> dict:
 # Lint / validation
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
-def syntax_check(source: str, timeout_sec: int = 60) -> dict:
+@mcp.tool(annotations=_RUN)
+def syntax_check(source: str, timeout_sec: int = 60) -> dict[str, Any]:
     """Compile a source via MetaEditor's syntax-only mode (`/s`) and return diagnostics."""
     L = layout()
     src = Path(source)
     if not src.exists():
-        return {"error": f"source not found: {src}"}
+        raise ToolError(f"source not found: {src}")
     if not L.metaeditor.exists():
-        return {"error": f"MetaEditor missing: {L.metaeditor}"}
+        raise ToolError(f"MetaEditor missing: {L.metaeditor}")
 
     log_path = _workdir(src) / f"{src.stem}.syntax.log"
     cmd = [str(L.metaeditor), "/s", f"/compile:{src}", f"/include:{L.mql_root}", f"/log:{log_path}"]
@@ -651,48 +685,48 @@ def syntax_check(source: str, timeout_sec: int = 60) -> dict:
     }
 
 
-@mcp.tool()
-def lint_basic(source: str) -> dict:
+@mcp.tool(annotations=_RO)
+def lint_basic(source: str) -> dict[str, Any]:
     """Run structural lint rules (missing handlers, unused inputs, hardcoded magic/symbol)."""
-    return _lint.lint_basic(source)
+    return _raise_if_error(_lint.lint_basic(source))
 
 
-@mcp.tool()
-def check_deprecated(source: str) -> dict:
+@mcp.tool(annotations=_RO)
+def check_deprecated(source: str) -> dict[str, Any]:
     """Flag MT4-style deprecated API calls in MT5 source."""
     return {"file": source, "findings": _lint.check_deprecated(source)}
 
 
-@mcp.tool()
-def validate_tester_ini(config: str, source: Optional[str] = None) -> dict:
+@mcp.tool(annotations=_RO)
+def validate_tester_ini(config: str, source: Optional[str] = None) -> dict[str, Any]:
     """Sanity-check a tester.ini. If `source` given, cross-check inputs vs EA declarations."""
-    return _lint.validate_tester_ini(config, source=source)
+    return _raise_if_error(_lint.validate_tester_ini(config, source=source))
 
 
 # ---------------------------------------------------------------------------
 # Formatting
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
-def format_mql(source: str, style: Optional[str] = None, write: bool = True) -> dict:
+@mcp.tool(annotations=_DESTRUCTIVE)
+def format_mql(source: str, style: Optional[str] = None, write: bool = True) -> dict[str, Any]:
     """Format an MQL file via clang-format (treats source as C++)."""
-    return _formatting.format_mql(source, style=style, write=write)
+    return _raise_if_error(_formatting.format_mql(source, style=style, write=write))
 
 
-@mcp.tool()
-def format_check(source: str, style: Optional[str] = None) -> dict:
+@mcp.tool(annotations=_RO)
+def format_check(source: str, style: Optional[str] = None) -> dict[str, Any]:
     """Report whether a file needs formatting without writing it."""
-    return _formatting.format_check(source, style=style)
+    return _raise_if_error(_formatting.format_check(source, style=style))
 
 
 # ---------------------------------------------------------------------------
 # Refactor
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
-def rename_symbol(old: str, new: str, root: str, dry_run: bool = True) -> dict:
+@mcp.tool(annotations=_DESTRUCTIVE)
+def rename_symbol(old: str, new: str, root: str, dry_run: bool = True) -> dict[str, Any]:
     """Rename a symbol across MQL files (whole-word match). `dry_run=True` previews only."""
-    return _refactor.rename_symbol(old, new, root, dry_run=dry_run)
+    return _raise_if_error(_refactor.rename_symbol(old, new, root, dry_run=dry_run))
 
 
 # ---------------------------------------------------------------------------
@@ -700,18 +734,21 @@ def rename_symbol(old: str, new: str, root: str, dry_run: bool = True) -> dict:
 # ---------------------------------------------------------------------------
 
 def _load_opt(path: Optional[str], expert: Optional[str], symbol: Optional[str],
-              period: Optional[str]) -> dict:
+              period: Optional[str]) -> dict[str, Any]:
     L = layout()
     target = path or _optimization.find_latest_opt(L.tester_dir, expert=expert, symbol=symbol, period=period)
     if not target:
-        return {"error": "no matching .opt file found under Tester/ (caches auto-delete after 30 days unused)"}
-    return _optimization.parse_opt_file(target)
+        raise ToolError("no matching .opt file found under Tester/ (caches auto-delete after 30 days unused)")
+    parsed = _optimization.parse_opt_file(target)
+    if parsed.get("error") and not parsed.get("passes"):
+        raise ToolError(f"{parsed['error']} ({parsed.get('path', target)})")
+    return parsed
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 def parse_optimization(path: Optional[str] = None, expert: Optional[str] = None,
                        symbol: Optional[str] = None, period: Optional[str] = None,
-                       sample: int = 50) -> dict:
+                       sample: int = 50) -> dict[str, Any]:
     """Parse an MT5 `.opt` optimisation cache (header, inputs, pass count, first `sample` passes).
 
     Without `path`, the newest cache under Tester/ is used; pass `expert`/`symbol`/`period`
@@ -725,15 +762,15 @@ def parse_optimization(path: Optional[str] = None, expert: Optional[str] = None,
     return parsed
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 def top_passes(opt_path: Optional[str] = None, criterion: str = "profit",
                n: int = 10, descending: bool = True, expert: Optional[str] = None,
-               symbol: Optional[str] = None, period: Optional[str] = None) -> dict:
+               symbol: Optional[str] = None, period: Optional[str] = None) -> dict[str, Any]:
     """Sort *all* optimization passes by criterion and return the top N."""
     parsed = _load_opt(opt_path, expert, symbol, period)
     passes = parsed.get("passes") or []
     if not passes:
-        return {"error": parsed.get("error", "no passes parsed"), "path": parsed.get("path")}
+        raise ToolError(f"{parsed.get('error', 'no passes parsed')} ({parsed.get('path')})")
     return {
         "path": parsed.get("path"),
         "criterion": criterion,
@@ -747,30 +784,30 @@ def top_passes(opt_path: Optional[str] = None, criterion: str = "profit",
 # Reports comparison
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
-def compare_reports(baseline: str, candidate: str) -> dict:
+@mcp.tool(annotations=_RO)
+def compare_reports(baseline: str, candidate: str) -> dict[str, Any]:
     """Diff two MT5 tester HTML reports key-by-key with absolute and percent deltas."""
-    return _reports.compare_reports(baseline, candidate)
+    return _raise_if_error(_reports.compare_reports(baseline, candidate))
 
 
-@mcp.tool()
-def regression_check(baseline: str, candidate: str, guards: Optional[dict] = None) -> dict:
+@mcp.tool(annotations=_RO)
+def regression_check(baseline: str, candidate: str, guards: Optional[dict] = None) -> dict[str, Any]:
     """Verify candidate report stays within guard thresholds vs baseline."""
-    return _reports.regression_check(baseline, candidate, guards=guards)
+    return _raise_if_error(_reports.regression_check(baseline, candidate, guards=guards))
 
 
 # ---------------------------------------------------------------------------
 # Source snapshots
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
-def snapshot_sources(sources: list[str], dest: str, label: Optional[str] = None) -> dict:
+@mcp.tool(annotations=_WRITE)
+def snapshot_sources(sources: list[str], dest: str, label: Optional[str] = None) -> dict[str, Any]:
     """Freeze a copy of source files into a timestamped folder under `dest`."""
     return _snapshot.snapshot_sources(sources, dest, label=label)
 
 
-@mcp.tool()
-def list_snapshots(dest: str) -> dict:
+@mcp.tool(annotations=_RO)
+def list_snapshots(dest: str) -> dict[str, Any]:
     """List all snapshot folders under `dest`."""
     return {"snapshots": _snapshot.list_snapshots(dest)}
 
@@ -779,9 +816,9 @@ def list_snapshots(dest: str) -> dict:
 # Terminal selection
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@mcp.tool(annotations=_RUN)
 def select_terminal(origin: Optional[str] = None, hash: Optional[str] = None,
-                    install: Optional[str] = None, edition: str = "mt5") -> dict:
+                    install: Optional[str] = None, edition: str = "mt5") -> dict[str, Any]:
     """Switch the active terminal data folder for this session.
 
     Provide one of: `origin` (install path stored in origin.txt), `hash` (32-char
@@ -798,7 +835,7 @@ def select_terminal(origin: Optional[str] = None, hash: Optional[str] = None,
                 target_hash = t["hash"]
                 break
         if not target_hash:
-            return {"error": f"no terminal data folder found for origin: {origin}"}
+            raise ToolError(f"no terminal data folder found for origin: {origin}")
 
     if target_install and not target_hash:
         found = find_terminal_for_install(target_install)
@@ -826,10 +863,10 @@ def select_terminal(origin: Optional[str] = None, hash: Optional[str] = None,
 # Smoke test
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@mcp.tool(annotations=_DESTRUCTIVE)
 def smoke_test(source: str, expert_name: Optional[str] = None,
                symbol: str = "EURUSD", period: str = "M15", days: int = 1,
-               timeout_sec: int = 600) -> dict:
+               timeout_sec: int = 600) -> dict[str, Any]:
     """Compile, deploy, run a 1-day headless backtest, and scan the journal for runtime errors.
 
     Returns `ok: true` only if compilation, deployment, run, and the journal scan all pass.
@@ -849,19 +886,19 @@ def smoke_test(source: str, expert_name: Optional[str] = None,
 # AST-style refactor
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@mcp.tool(annotations=_DESTRUCTIVE)
 def extract_function(source: str, line_start: int, line_end: int, new_name: str,
                      return_type: str = "void", target_file: Optional[str] = None,
-                     dry_run: bool = True) -> dict:
+                     dry_run: bool = True) -> dict[str, Any]:
     """Extract a contiguous block of lines into a new helper function.
 
     Brace-counting + regex param detection — not a full AST parser. Returns the
     proposed helper, call site, and parameter list. Set `dry_run=False` to write.
     """
-    return _ast_refactor.extract_function(
+    return _raise_if_error(_ast_refactor.extract_function(
         source, line_start, line_end, new_name,
         return_type=return_type, target_file=target_file, dry_run=dry_run,
-    )
+    ))
 
 
 # ---------------------------------------------------------------------------
