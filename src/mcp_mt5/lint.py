@@ -34,14 +34,15 @@ def check_deprecated(source: str | Path) -> list[dict]:
         return []
     text = read_text_auto(p)
     cleaned = _strip_comments_strings(text)
-    # Ask/Bid are MT4 predefined variables (no parens). Treat them specially.
-    bare_vars = {"Ask", "Bid"}
+    # Ask/Bid/Bars are MT4 predefined *variables*: flag bare uses only, never `obj.Ask()`, `Bars(...)`
+    # (the MQL5 function) or `x.Bars`. Function-style entries must not be preceded by `.`/`::` either.
+    bare_vars = {"Ask", "Bid", "Bars"}
     findings: list[dict] = []
     for fn, suggestion in _DEPRECATED_FUNCS.items():
         if fn in bare_vars:
-            pat = re.compile(rf"\b{re.escape(fn)}\b(?!\s*\w)")
+            pat = re.compile(rf"(?<![\w.:]){re.escape(fn)}\b(?!\s*[\w(.])")
         else:
-            pat = re.compile(rf"\b{re.escape(fn)}\b\s*\(")
+            pat = re.compile(rf"(?<![\w.:]){re.escape(fn)}\b\s*\(")
         for i, line in enumerate(cleaned.splitlines(), 1):
             if pat.search(line):
                 findings.append({"line": i, "func": fn, "suggestion": suggestion})
@@ -60,10 +61,11 @@ def lint_basic(source: str | Path) -> dict:
     is_ea = p.suffix.lower() in (".mq4", ".mq5")
 
     if is_ea:
-        if not re.search(r"\bvoid\s+OnTick\s*\(\s*\)", cleaned) and not re.search(r"\bvoid\s+OnStart\s*\(\s*\)", cleaned):
+        empty = r"\(\s*(?:void\s*)?\)"   # MQL allows both `OnTick()` and `OnTick(void)`
+        if not re.search(r"\bvoid\s+OnTick\s*" + empty, cleaned) and not re.search(r"\bvoid\s+OnStart\s*" + empty, cleaned):
             findings.append({"rule": "missing_entry_point",
                              "message": "EA source has no OnTick() or OnStart() handler"})
-        if not re.search(r"\b(int|void)\s+OnInit\s*\(\s*\)", cleaned):
+        if not re.search(r"\b(int|void)\s+OnInit\s*" + empty, cleaned):
             findings.append({"rule": "missing_oninit",
                              "message": "EA source has no OnInit() handler"})
         if not re.search(r"\bvoid\s+OnDeinit\s*\(\s*const\s+int", cleaned):

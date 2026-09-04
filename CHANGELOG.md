@@ -6,10 +6,18 @@ Protocol-quality release. The tool surface shrinks from 39 to 27 so the catalogu
 context per call, and every tool now behaves the way MCP clients expect.
 
 ### Changed (breaking)
-- **Consolidated tools** — see the "Renamed in 0.5.0" table in the README: `syntax_check` → `compile(syntax_only=true)`; `deploy_ea` + `install_include` → `deploy`; `extract_inputs`/`resolve_includes`/`extract_doc`/`find_symbol`/`find_magic_collision` → `inspect_source`; `lint_basic`/`check_deprecated`/`code_metrics` → `analyze_mql`; `format_check` → `format_mql` (dry run by default); `parse_optimization`/`top_passes` → `read_optimization`; `regression_check` → `compare_reports(guards=…)`; `list_backtests` → `get_backtest()`.
+- **Consolidated tools** — the old names remain as deprecated aliases until 0.6.0 (hide them with `MCP_MT5_LEGACY_TOOLS=0`); see the README table: `syntax_check` → `compile(syntax_only=true)`; `deploy_ea` + `install_include` → `deploy`; `extract_inputs`/`resolve_includes`/`extract_doc`/`find_symbol`/`find_magic_collision` → `inspect_source`; `lint_basic`/`check_deprecated`/`code_metrics` → `analyze_mql`; `format_check` → `format_mql` (dry run by default); `parse_optimization`/`top_passes` → `read_optimization`; `regression_check` → `compare_reports(guards=…)`; `list_backtests` → `get_backtest()`.
 - Resources `mt5://livelog`, `mt5://journal`, `mt5://tester-log` → template `mt5://log/{mode}`.
 - `read_tester_report` no longer inlines HTML by default (`raw_truncate=0`); the HTML is the `mt5://report/{id}` resource. `response_format="detailed"` returns trade rows.
 - Failures raise tool errors (`isError=true`) instead of returning `{"error": ...}`.
+
+### Fixed (found by running against a real MT5 build 6162 data folder)
+- `MT5_DATA` env var was documented but never read.
+- Journal parsing understands the tab-separated `<code>\t<n>\t<time>\t<source>\t<message>` format current builds write (date taken from the file name); `tail_log(mode="terminal")` and `mt5://log/terminal` expose the terminal's Journal-tab log.
+- Comment/string stripping is a single-pass scanner: a `//` inside `#property link "https://…"` used to be treated as a comment and swallow the rest of the file, producing false `unused_input` findings and hiding symbol uses on nearly every EA.
+- Lint accepts `OnInit(void)` / `OnTick(void)`; metrics count `Class::Method` definitions; `check_deprecated` no longer flags `obj.Ask()` or the MQL5 `Bars(...)` function.
+- `resolve_includes` does far fewer filesystem round-trips (WSL `/mnt/c` was 4 s per EA).
+- WSL support: paths passed to MetaEditor/terminal are translated with `wslpath -w` when the server runs under WSL against `/mnt/<drive>/...`.
 
 ### Added
 - Typed output (`outputSchema` / `structuredContent`) for every tool; `ToolAnnotations` (read-only / destructive hints) on every tool; per-parameter descriptions; server `instructions` describing the pipeline.

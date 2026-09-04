@@ -255,18 +255,34 @@ def parse_tester_report(html: str, max_trades: int | None = None) -> dict:
 # Journals
 # ---------------------------------------------------------------------------
 
-def iter_journal_lines(text: str) -> Iterator[dict]:
-    """Parse MT5 journal lines: 'YYYY.MM.DD HH:MM:SS.mmm  Source\tMessage'."""
-    pat_full = re.compile(
-        r"^(?P<ts>\d{4}\.\d{2}\.\d{2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+(?P<src>[^\t]+?)\t(?P<msg>.*)$"
-    )
-    pat_simple = re.compile(r"^(?P<ts>\d{4}\.\d{2}\.\d{2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+(?P<msg>.*)$")
+_JOURNAL_TABBED = re.compile(
+    r"^(?P<code>[A-Z0-9]{2})\t(?P<n>\d+)\t(?P<time>\d{2}:\d{2}:\d{2}(?:\.\d+)?)\t(?P<src>[^\t]*)\t(?P<msg>.*)$"
+)
+_JOURNAL_DATED_FULL = re.compile(
+    r"^(?P<ts>\d{4}\.\d{2}\.\d{2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+(?P<src>[^\t]+?)\t(?P<msg>.*)$"
+)
+_JOURNAL_DATED_SIMPLE = re.compile(r"^(?P<ts>\d{4}\.\d{2}\.\d{2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+(?P<msg>.*)$")
+
+
+def iter_journal_lines(text: str, date: str | None = None) -> Iterator[dict]:
+    """Parse MetaTrader journal lines in either on-disk format.
+
+    Current builds write `<2-char code>\t<int>\t<HH:MM:SS.mmm>\t<Source>\t<Message>` and keep the
+    date only in the file name (`YYYYMMDD.log`); pass `date` to prefix the timestamps. Older
+    exports use `YYYY.MM.DD HH:MM:SS.mmm  Source\tMessage`.
+    """
+    day = f"{date[:4]}.{date[4:6]}.{date[6:8]} " if date and len(date) == 8 and date.isdigit() else ""
     for line in text.splitlines():
-        m = pat_full.match(line)
+        m = _JOURNAL_TABBED.match(line)
+        if m:
+            yield {"ts": day + m.group("time"), "source": m.group("src").strip(), "message": m.group("msg"),
+                   "code": m.group("code")}
+            continue
+        m = _JOURNAL_DATED_FULL.match(line)
         if m:
             yield {"ts": m.group("ts"), "source": m.group("src").strip(), "message": m.group("msg")}
             continue
-        m = pat_simple.match(line)
+        m = _JOURNAL_DATED_SIMPLE.match(line)
         if m:
             yield {"ts": m.group("ts"), "source": "", "message": m.group("msg")}
 

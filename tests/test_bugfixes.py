@@ -450,3 +450,125 @@ def test_compare_reports_parses_space_grouped_numbers(tmp_path: Path):
     b.write_text(MT5_LIKE.replace("2 187.15", "1 795.23"), encoding="utf-8")
     d = next(x for x in compare_reports(a, b)["diffs"] if x["key"] == "gross_profit")
     assert d["delta"] == -391.92
+
+
+# --- WSL path translation ----------------------------------------------------------------
+
+def test_win_path_translates_only_wsl_mount_paths(monkeypatch):
+    from mcp_mt5 import winpath
+
+    monkeypatch.setattr(winpath.sys, "platform", "linux")
+    monkeypatch.setattr(winpath, "_wslpath_w", lambda s: "C:\\\\" + s[len("/mnt/c/"):].replace("/", "\\\\"))
+    assert winpath.win_path("/mnt/c/Users/me/EA.mq5") == "C:\\\\Users\\\\me\\\\EA.mq5"
+    assert winpath.win_path("/tmp/x/EA.mq5") == "/tmp/x/EA.mq5"          # not a Windows mount: untouched
+    monkeypatch.setattr(winpath.sys, "platform", "win32")
+    assert winpath.win_path("/mnt/c/whatever") == "/mnt/c/whatever"        # native Windows: no-op
+
+
+# --- found against a real MT5 build 6162 data folder (2026-09-04) ----------------------------
+
+def test_detect_layout_honours_mt5_data_env(tmp_path: Path, monkeypatch):
+    from mcp_mt5.paths import detect_layout
+    data = tmp_path / "Terminal" / "ABCDEF0123456789ABCDEF0123456789"
+    (data / "MQL5").mkdir(parents=True)
+    monkeypatch.setenv("MT5_INSTALL", str(tmp_path / "MT5"))
+    monkeypatch.setenv("MT5_DATA", str(data))
+    monkeypatch.delenv("MT5_TERMINAL_HASH", raising=False)
+    L = detect_layout()
+    assert L.data == data and L.terminal_hash == "ABCDEF0123456789ABCDEF0123456789"
+
+
+def test_journal_parser_reads_current_tab_separated_format():
+    from mcp_mt5.parsers import iter_journal_lines
+    text = ("PK\t0\t13:48:37.803\tTerminal\tMetaTrader 5 x64 build 6162 started for MetaQuotes Ltd.\n"
+            "RS\t0\t13:49:29.187\tMQL5.community\tactivated for 'User', balance: 0.47\n")
+    recs = list(iter_journal_lines(text, date="20260904"))
+    assert len(recs) == 2
+    assert recs[0] == {"ts": "2026.09.04 13:48:37.803", "source": "Terminal",
+                       "message": "MetaTrader 5 x64 build 6162 started for MetaQuotes Ltd.", "code": "PK"}
+    # the older dated format still parses
+    assert list(iter_journal_lines("2024.01.01 12:00:00.123\tNetwork\tconnection lost"))[0]["source"] == "Network"
+
+
+def test_lint_accepts_void_parameter_lists_and_counts_methods(tmp_path: Path):
+    from mcp_mt5.analysis import code_metrics
+    from mcp_mt5.lint import lint_basic
+    src = tmp_path / "wizard.mq5"
+    src.write_text(
+        "class CSampleExpert { public: bool Init(void); void Process(const int x) const; };\n"
+        "bool CSampleExpert::Init(void)\n  {\n   return(true);\n  }\n"
+        "void CSampleExpert::Process(const int x) const\n  {\n  }\n"
+        "int OnInit(void)\n  {\n   return(INIT_SUCCEEDED);\n  }\n"
+        "void OnDeinit(const int reason)\n  {\n  }\n"
+        "void OnTick(void)\n  {\n  }\n",
+        encoding="utf-8",
+    )
+    rules = {f["rule"] for f in lint_basic(src)["findings"]}
+    assert not ({"missing_entry_point", "missing_oninit", "missing_ondeinit"} & rules)
+    assert code_metrics(src)["function_count"] == 5
+
+
+def test_tail_log_terminal_mode_parses_dated_records(tmp_path: Path, monkeypatch):
+    install = tmp_path / "MT5"
+    install.mkdir()
+    (install / "terminal64.exe").write_bytes(b"")
+    (install / "MetaEditor64.exe").write_bytes(b"")
+    data = tmp_path / "data"
+    (data / "logs").mkdir(parents=True)
+    (data / "MQL5" / "Experts").mkdir(parents=True)
+    (data / "logs" / "20260904.log").write_bytes(
+        b"\xff\xfe" + "PK\t0\t13:48:37.803\tTerminal\tstarted\n".encode("utf-16-le"))
+    monkeypatch.setattr(server, "_layout_cache", MT5Layout(install=install, data=data, terminal_hash="H", edition="mt5"))
+    out = server.tail_log(mode="terminal", date="20260904", structured=True)
+    assert out["records"][0]["ts"] == "2026.09.04 13:48:37.803" and out["records"][0]["source"] == "Terminal"
+
+
+def test_strip_comments_keeps_code_after_url_in_string():
+    from mcp_mt5.analysis import _strip_comments_strings
+    src = ('#property link      "https://www.mql5.com"\n'
+           '#property version   "5.50"\n'
+           'input double InpLots = 0.1; // Lots\n'
+           "/* block\n   comment */ string s = \"a // not a comment\"; char c = '\\''; datetime d = D'2024.01.01';\n"
+           "bool ok = InpLots > 0;   // use\n")
+    cleaned = _strip_comments_strings(src)
+    assert cleaned.count("\n") == src.count("\n")                 # line numbers preserved
+    assert "InpLots" in cleaned and cleaned.count("InpLots") == 2 # declaration + use survive
+    assert "mql5.com" not in cleaned and "not a comment" not in cleaned and "block" not in cleaned
+    assert "Lots" not in cleaned.replace("InpLots", "")            # comments gone
+    assert "bool ok" in cleaned
+
+
+def test_check_deprecated_ignores_methods_and_mql5_bars_function(tmp_path: Path):
+    from mcp_mt5.lint import check_deprecated
+    src = tmp_path / "ea.mq5"
+    src.write_text(
+        "double a = m_symbol.Ask();\n"        # method on a CSymbolInfo object: fine
+        "int n = Bars(_Symbol, _Period);\n"   # MQL5 function: fine
+        "int k = rates.Bars;\n"               # member: fine
+        "double b = Bid;\n"                   # MT4 predefined variable: flag
+        "int m = Bars;\n"                     # MT4 predefined variable: flag
+        "OrderSend(Symbol(), OP_BUY, 0.1, Ask, 3, 0, 0);\n",  # MT4 call + bare Ask: flag both
+        encoding="utf-8",
+    )
+    found = sorted((f["line"], f["func"]) for f in check_deprecated(src))
+    assert found == [(4, "Bid"), (5, "Bars"), (6, "Ask"), (6, "OrderSend")]
+
+
+def test_wsl_autodetect_scans_mnt_and_matches_windows_origin(tmp_path: Path, monkeypatch):
+    from mcp_mt5 import paths
+    mnt = tmp_path / "mnt"
+    install = mnt / "c" / "Program Files" / "MetaTrader 5"
+    install.mkdir(parents=True)
+    data = mnt / "c" / "Users" / "me" / "AppData" / "Roaming" / "MetaQuotes" / "Terminal" / ("A" * 32)
+    data.mkdir(parents=True)
+    (data / "origin.txt").write_bytes(b"\xff\xfe" + r"C:\Program Files\MetaTrader 5".encode("utf-16-le"))
+    monkeypatch.setattr(paths.sys, "platform", "linux")
+    monkeypatch.delenv("APPDATA", raising=False)
+    monkeypatch.delenv("MT5_INSTALL", raising=False)
+    monkeypatch.delenv("MT5_DATA", raising=False)
+    monkeypatch.delenv("MT5_TERMINAL_HASH", raising=False)
+    monkeypatch.setattr(paths, "win_path", lambda p: "C:\\" + str(p).split("/mnt/c/", 1)[1].replace("/", "\\"))
+    monkeypatch.setattr(paths, "_MNT_ROOT", mnt)
+    L = paths.detect_layout()
+    assert L.install == install and L.data == data and L.terminal_hash == "A" * 32
+    assert paths.list_terminal_origins()[0]["hash"] == "A" * 32

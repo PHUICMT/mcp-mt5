@@ -13,7 +13,7 @@ from mcp_mt5.paths import MT5Layout
 
 pytestmark = pytest.mark.anyio
 
-EXPECTED_TOOL_COUNT = 27
+EXPECTED_TOOL_COUNT = 27 + (len(server.LEGACY_TOOL_NAMES) if server.LEGACY_TOOLS_ENABLED else 0)
 
 
 @pytest.fixture
@@ -158,3 +158,16 @@ async def test_report_is_exposed_as_resource_not_inline_html(session, fake_layou
     assert "1 234.50" in latest.contents[0].text
     detailed = await session.call_tool("read_tester_report", {"response_format": "detailed", "raw_truncate": 100})
     assert "trades" in detailed.structuredContent and len(detailed.structuredContent["raw_truncated"]) == 100
+
+
+@pytest.mark.skipif(not server.LEGACY_TOOLS_ENABLED, reason="legacy aliases disabled via MCP_MT5_LEGACY_TOOLS=0")
+async def test_legacy_aliases_are_marked_deprecated_and_forward(session, fake_layout, tmp_path: Path):
+    tools = {t.name: t for t in (await session.list_tools()).tools}
+    for name in server.LEGACY_TOOL_NAMES:
+        assert name in tools and tools[name].description.startswith("DEPRECATED (removed in 0.6.0)")
+    src = tmp_path / "ea.mq5"
+    src.write_text("input int InpX = 1;\nvoid OnTick() { int y = InpX; }\n", encoding="utf-8")
+    r = await session.call_tool("extract_inputs", {"source": str(src)})
+    assert r.isError is False and r.structuredContent["inputs"][0]["name"] == "InpX"
+    r = await session.call_tool("lint_basic", {"source": str(src)})
+    assert r.isError is False and "findings" in r.structuredContent

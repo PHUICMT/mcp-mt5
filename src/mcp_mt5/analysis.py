@@ -1,6 +1,7 @@
 """Source analysis: inputs, includes, symbols, metrics, docs, magic numbers."""
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -69,36 +70,35 @@ def resolve_includes(source: str | Path, mql_root: str | Path | None = None,
     Returns:
         {"file": <path>, "missing": [...], "resolved": [...children dicts...]}
     """
-    p = Path(source).resolve()
+    p = Path(os.path.normpath(os.path.abspath(str(source))))   # normpath: no extra stat() calls, unlike resolve()
     visited = visited or set()
     if str(p) in visited:
         return {"file": str(p), "cycle": True, "resolved": [], "missing": []}
     visited.add(str(p))
 
-    if not p.exists():
+    try:
+        text = read_text_auto(p)                                # one read instead of exists() + read
+    except OSError:
         return {"file": str(p), "exists": False, "resolved": [], "missing": []}
-
-    text = read_text_auto(p)
     resolved: list[dict] = []
     missing: list[str] = []
 
+    def _child(target: Path, label: str) -> None:
+        child = resolve_includes(target, mql_root, visited)
+        if child.get("exists", True):
+            resolved.append(child)
+        else:
+            missing.append(label)
+
     for m in _INCLUDE_QUOTE_RE.finditer(text):
         rel = m.group(1).replace("\\", "/")
-        target = (p.parent / rel).resolve()
-        if target.exists():
-            resolved.append(resolve_includes(target, mql_root, visited))
-        else:
-            missing.append(rel)
+        _child(p.parent / rel, rel)
 
     if mql_root:
         root = Path(mql_root)
         for m in _INCLUDE_ANGLE_RE.finditer(text):
             rel = m.group(1).replace("\\", "/")
-            target = root / "Include" / rel
-            if target.exists():
-                resolved.append(resolve_includes(target, mql_root, visited))
-            else:
-                missing.append(f"<{rel}>")
+            _child(root / "Include" / rel, f"<{rel}>")
 
     return {
         "file": str(p),
@@ -109,12 +109,39 @@ def resolve_includes(source: str | Path, mql_root: str | Path | None = None,
 
 
 def _strip_comments_strings(text: str) -> str:
-    """Remove `//`, `/* */` comments and string/char literals to reduce false matches."""
-    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.DOTALL)
-    text = re.sub(r"//[^\n]*", " ", text)
-    text = re.sub(r'"(?:\\.|[^"\\])*"', '""', text)
-    text = re.sub(r"'(?:\\.|[^'\\])*'", "''", text)
-    return text
+    """Blank out comments and string/char literal contents in one left-to-right pass.
+
+    A single scanner is required: stripping `//` comments with a regex first would treat the
+    `//` inside `#property link "https://..."` as a comment, leave an unbalanced quote, and
+    swallow everything up to the next string literal (observed on MetaQuotes' own example EAs).
+    Newlines are preserved so line numbers stay valid; literals become `""` / `''`.
+    """
+    out: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        if ch == "/" and nxt == "/":                       # line comment
+            j = text.find("\n", i)
+            j = n if j == -1 else j
+            out.append(" " * (j - i))
+            i = j
+        elif ch == "/" and nxt == "*":                     # block comment (keep newlines)
+            j = text.find("*/", i + 2)
+            j = n if j == -1 else j + 2
+            out.append("".join("\n" if c == "\n" else " " for c in text[i:j]))
+            i = j
+        elif ch in ('"', "'"):                             # string / char / D'…' / C'…' literal
+            q = ch
+            j = i + 1
+            while j < n and text[j] != q and text[j] != "\n":
+                j += 2 if text[j] == "\\" else 1
+            out.append(q + q)
+            i = min(j + 1, n)
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
 
 
 def find_symbol(symbol: str, root: str | Path, exts: tuple[str, ...] = (".mq4", ".mq5", ".mqh"),
@@ -143,7 +170,7 @@ def find_symbol(symbol: str, root: str | Path, exts: tuple[str, ...] = (".mq4", 
 
 
 _FUNC_RE = re.compile(
-    r"^\s*(?:[A-Za-z_][\w:]*\s+){1,3}([A-Za-z_]\w*)\s*\([^;]*?\)\s*\{",
+    r"^\s*(?:[A-Za-z_][\w:<>]*[\s*&]+){1,3}((?:[A-Za-z_]\w*::)?~?[A-Za-z_]\w*)\s*\([^;{}]*?\)\s*(?:const\s*)?\{",
     re.MULTILINE,
 )
 

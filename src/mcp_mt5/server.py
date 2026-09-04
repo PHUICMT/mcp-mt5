@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import subprocess
 import time
@@ -24,6 +25,7 @@ from .parsers import (
     write_text_preserving,
     iter_journal_lines,
 )
+from .winpath import win_path
 from .workdir import workdir
 from . import analysis as _analysis
 from . import lint as _lint
@@ -214,7 +216,7 @@ def compile(
     suffix = "syntax" if syntax_only else "compile"
     log_path = Path(log_file) if log_file else (_workdir(src) / f"{src.stem}.{suffix}.log")
 
-    cmd = [str(L.metaeditor), *(["/s"] if syntax_only else []), f"/compile:{src}", f"/include:{inc}", f"/log:{log_path}"]
+    cmd = [str(L.metaeditor), *(["/s"] if syntax_only else []), f"/compile:{win_path(src)}", f"/include:{win_path(inc)}", f"/log:{win_path(log_path)}"]
     started = time.time()
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
@@ -455,7 +457,7 @@ def kill_terminal(
 
 @mcp.tool(annotations=_RO)
 def tail_log(
-    mode: Annotated[str, Field(description='"live" = MQL5/Files/LiveLog.txt, "journal" = MQL5/Logs/YYYYMMDD.log, "tester" = newest Tester/logs file.')] = 'live',
+    mode: Annotated[Literal["live", "journal", "terminal", "tester"], Field(description='"live" = MQL5/Files/LiveLog.txt written by the EA, "journal" = MQL5/Logs/YYYYMMDD.log (Experts tab), "terminal" = logs/YYYYMMDD.log (Journal tab: connection, tester start), "tester" = newest Tester/logs file.')] = 'live',
     lines: Annotated[int, Field(description='Number of lines from the end of the file.')] = 100,
     date: Annotated[Optional[str], Field(description='Journal date as YYYYMMDD; defaults to today.')] = None,
     structured: Annotated[bool, Field(description='Parse journal lines into {ts, source, message} records (journal/tester modes).')] = False,
@@ -467,9 +469,9 @@ def tail_log(
     L = layout()
     if mode == "live":
         path = L.files_dir / "LiveLog.txt"
-    elif mode == "journal":
+    elif mode in ("journal", "terminal"):
         d = date or datetime.now().strftime("%Y%m%d")
-        path = L.logs_dir / f"{d}.log"
+        path = (L.logs_dir if mode == "journal" else L.terminal_logs_dir) / f"{d}.log"
     elif mode == "tester":
         if not L.tester_logs.exists():
             raise ToolError(f"tester logs dir missing: {L.tester_logs}")
@@ -486,8 +488,8 @@ def tail_log(
     text = read_text_auto(path)
     tail_lines = text.splitlines()[-lines:]
     out: dict = {"path": str(path), "line_count": len(tail_lines)}
-    if structured and mode in ("journal", "tester"):
-        out["records"] = list(iter_journal_lines("\n".join(tail_lines)))
+    if structured and mode in ("journal", "terminal", "tester"):
+        out["records"] = list(iter_journal_lines("\n".join(tail_lines), date=path.stem if path.stem.isdigit() else None))
     else:
         out["content"] = "\n".join(tail_lines)
     return out
@@ -1028,21 +1030,139 @@ def report_resource(report_id: str) -> str:
     return read_text_auto(p)
 
 
+# ---------------------------------------------------------------------------
+# Deprecated aliases (0.5.x): the pre-0.5.0 tool names, forwarding to the consolidated tools.
+# They are removed in 0.6.0. Set MCP_MT5_LEGACY_TOOLS=0 to hide them and save context.
+# ---------------------------------------------------------------------------
+
+LEGACY_TOOLS_ENABLED = os.environ.get("MCP_MT5_LEGACY_TOOLS", "1").lower() not in ("0", "false", "no", "off")
+LEGACY_TOOL_NAMES = (
+    "syntax_check", "deploy_ea", "install_include", "extract_inputs", "resolve_includes", "extract_doc",
+    "find_symbol", "find_magic_collision", "lint_basic", "check_deprecated", "code_metrics", "format_check",
+    "parse_optimization", "top_passes", "regression_check", "list_backtests",
+)
+_SRC = Annotated[str, Field(description="Absolute Windows path to the .mq4/.mq5/.mqh source file.")]
+_ROOT = Annotated[str, Field(description="Absolute path to the project folder to scan recursively.")]
+
+if LEGACY_TOOLS_ENABLED:
+
+    @mcp.tool(annotations=_RUN)
+    def syntax_check(source: _SRC, timeout_sec: Annotated[int, Field(description="Give up after this many seconds.")] = 60) -> dict[str, Any]:
+        """DEPRECATED (removed in 0.6.0): use compile(source, syntax_only=true)."""
+        return compile(source, timeout_sec=timeout_sec, syntax_only=True)
+
+    @mcp.tool(annotations=_DESTRUCTIVE)
+    def deploy_ea(source_ex: Annotated[str, Field(description="Absolute path to the compiled .ex4/.ex5 binary.")],
+                  name: Annotated[Optional[str], Field(description="File name to use inside Experts/.")] = None) -> dict[str, Any]:
+        """DEPRECATED (removed in 0.6.0): use deploy(file, name)."""
+        return deploy(source_ex, name)
+
+    @mcp.tool(annotations=_DESTRUCTIVE)
+    def install_include(source: _SRC, target_name: Annotated[Optional[str], Field(description="File name to use inside Include/.")] = None) -> dict[str, Any]:
+        """DEPRECATED (removed in 0.6.0): use deploy(file, name) with a .mqh file."""
+        return deploy(source, target_name)
+
+    @mcp.tool(annotations=_RO)
+    def extract_inputs(source: _SRC) -> dict[str, Any]:
+        """DEPRECATED (removed in 0.6.0): use inspect_source(source, aspects=["inputs"])."""
+        return {"file": source, "inputs": inspect_source(source, aspects=["inputs"])["inputs"]}
+
+    @mcp.tool(annotations=_RO)
+    def resolve_includes(source: _SRC, mql_root: Annotated[Optional[str], Field(description="MQL root for <angle> includes.")] = None) -> dict[str, Any]:
+        """DEPRECATED (removed in 0.6.0): use inspect_source(source, aspects=["includes"])."""
+        return inspect_source(source, aspects=["includes"], mql_root=mql_root)["includes"]
+
+    @mcp.tool(annotations=_RO)
+    def extract_doc(source: _SRC) -> dict[str, Any]:
+        """DEPRECATED (removed in 0.6.0): use inspect_source(source, aspects=["docs"])."""
+        return {"file": source, "blocks": inspect_source(source, aspects=["docs"])["docs"]}
+
+    @mcp.tool(annotations=_RO)
+    def find_symbol(symbol: Annotated[str, Field(description="Identifier to search for.")], root: _ROOT,
+                    exts: Annotated[Optional[list[str]], Field(description="File extensions to search.")] = None,
+                    limit: Annotated[int, Field(description="Stop after this many matches.")] = 200) -> dict[str, Any]:
+        """DEPRECATED (removed in 0.6.0): use inspect_source(root=..., symbol=...)."""
+        matches = _analysis.find_symbol(symbol, root, exts=tuple(exts) if exts else (".mq4", ".mq5", ".mqh"), limit=limit)
+        return {"symbol": symbol, "root": root, "match_count": len(matches), "matches": matches}
+
+    @mcp.tool(annotations=_RO)
+    def find_magic_collision(root: _ROOT, var_pattern: Annotated[str, Field(description="Substring identifying magic-number variables.")] = "Magic") -> dict[str, Any]:
+        """DEPRECATED (removed in 0.6.0): use inspect_source(root=..., aspects=["magic"])."""
+        return inspect_source(root=root, aspects=["magic"], var_pattern=var_pattern)["magic"]
+
+    @mcp.tool(annotations=_RO)
+    def lint_basic(source: _SRC) -> dict[str, Any]:
+        """DEPRECATED (removed in 0.6.0): use analyze_mql(source, checks=["lint"])."""
+        return analyze_mql(source, checks=["lint"])["lint"]
+
+    @mcp.tool(annotations=_RO)
+    def check_deprecated(source: _SRC) -> dict[str, Any]:
+        """DEPRECATED (removed in 0.6.0): use analyze_mql(source, checks=["deprecated"])."""
+        return {"file": source, "findings": analyze_mql(source, checks=["deprecated"])["deprecated"]}
+
+    @mcp.tool(annotations=_RO)
+    def code_metrics(source: Annotated[Optional[str], Field(description="Absolute path of one source file.")] = None,
+                     root: Annotated[Optional[str], Field(description="Absolute folder to aggregate over.")] = None) -> dict[str, Any]:
+        """DEPRECATED (removed in 0.6.0): use analyze_mql(source or root, checks=["metrics"])."""
+        return analyze_mql(source=source, root=root, checks=["metrics"])["metrics"]
+
+    @mcp.tool(annotations=_RO)
+    def format_check(source: _SRC, style: Annotated[Optional[str], Field(description="clang-format style string.")] = None) -> dict[str, Any]:
+        """DEPRECATED (removed in 0.6.0): use format_mql(source) (dry run by default)."""
+        return format_mql(source, style=style, write=False)
+
+    @mcp.tool(annotations=_RO)
+    def parse_optimization(path: Annotated[Optional[str], Field(description="Absolute path to a .opt cache.")] = None,
+                           expert: Annotated[Optional[str], Field(description="Expert name to select the cache.")] = None,
+                           symbol: Annotated[Optional[str], Field(description="Symbol to select the cache.")] = None,
+                           period: Annotated[Optional[str], Field(description="Timeframe to select the cache.")] = None,
+                           sample: Annotated[int, Field(description="Passes to include in passes_sample.")] = 50) -> dict[str, Any]:
+        """DEPRECATED (removed in 0.6.0): use read_optimization(...)."""
+        out = read_optimization(path=path, expert=expert, symbol=symbol, period=period, top_n=sample)
+        out["passes_sample"] = out.pop("top")
+        return out
+
+    @mcp.tool(annotations=_RO)
+    def top_passes(opt_path: Annotated[Optional[str], Field(description="Absolute path to a .opt cache.")] = None,
+                   criterion: Annotated[str, Field(description="Pass field to rank by.")] = "profit",
+                   n: Annotated[int, Field(description="How many passes to return.")] = 10,
+                   descending: Annotated[bool, Field(description="true = highest first.")] = True,
+                   expert: Annotated[Optional[str], Field(description="Expert name to select the cache.")] = None,
+                   symbol: Annotated[Optional[str], Field(description="Symbol to select the cache.")] = None,
+                   period: Annotated[Optional[str], Field(description="Timeframe to select the cache.")] = None) -> dict[str, Any]:
+        """DEPRECATED (removed in 0.6.0): use read_optimization(criterion=..., top_n=...)."""
+        return read_optimization(path=opt_path, expert=expert, symbol=symbol, period=period, criterion=criterion, top_n=n, descending=descending)
+
+    @mcp.tool(annotations=_RO)
+    def regression_check(baseline: Annotated[str, Field(description="Absolute path to the baseline report.")],
+                         candidate: Annotated[str, Field(description="Absolute path to the candidate report.")],
+                         guards: Annotated[Optional[dict], Field(description="Percent thresholds per summary key.")] = None) -> dict[str, Any]:
+        """DEPRECATED (removed in 0.6.0): use compare_reports(baseline, candidate, guards=...)."""
+        return _raise_if_error(_reports.regression_check(baseline, candidate, guards=guards))
+
+    @mcp.tool(annotations=_RO)
+    def list_backtests() -> dict[str, Any]:
+        """DEPRECATED (removed in 0.6.0): use get_backtest() without run_id."""
+        return get_backtest()
+
+
 @mcp.resource("mt5://log/{mode}")
 def log_resource(mode: str) -> str:
-    """Latest 500 lines of a MetaTrader log: mode = livelog (MQL5/Files/LiveLog.txt), journal (today's MQL5/Logs), tester (newest Tester/logs)."""
+    """Latest 500 lines of a MetaTrader log: mode = livelog (MQL5/Files/LiveLog.txt), journal (today's MQL5/Logs), terminal (today's logs/), tester (newest Tester/logs)."""
     L = layout()
     if mode == "livelog":
         path = L.files_dir / "LiveLog.txt"
     elif mode == "journal":
         path = L.logs_dir / f"{datetime.now().strftime('%Y%m%d')}.log"
+    elif mode == "terminal":
+        path = L.terminal_logs_dir / f"{datetime.now().strftime('%Y%m%d')}.log"
     elif mode == "tester":
         files = sorted(L.tester_logs.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True) if L.tester_logs.exists() else []
         if not files:
             return "(no tester logs)"
         path = files[0]
     else:
-        return f"(unknown log mode {mode}; use livelog, journal or tester)"
+        return f"(unknown log mode {mode}; use livelog, journal, terminal or tester)"
     if not path.exists():
         return f"(no log at {path})"
     return f"# {path.name}\n" + "\n".join(read_text_auto(path).splitlines()[-500:])

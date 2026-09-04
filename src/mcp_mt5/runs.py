@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import smoke as _smoke
+from .winpath import win_path
 from .workdir import workdir
 
 Finalizer = Callable[["Run"], dict]
@@ -69,7 +70,7 @@ class RunRegistry:
     # -- lifecycle -------------------------------------------------------------------
     def start(self, terminal: Path, config: Path, timeout_sec: int, extra_args: tuple[str, ...],
               finalize: Finalizer) -> Run:
-        cmd = [str(terminal), f"/config:{config}", *extra_args]
+        cmd = [str(terminal), f"/config:{win_path(config)}", *extra_args]
         run = Run(run_id=uuid.uuid4().hex[:12], config=str(config), cmd=cmd, timeout_sec=timeout_sec)
         try:
             proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

@@ -27,7 +27,7 @@ For runtime trading, pair this with a live-trading MCP — they target different
 
 ## Tools
 
-27 tools and 2 resource templates. Every tool carries MCP annotations (read-only / destructive hints), a typed output schema and per-parameter descriptions; failures are reported as tool errors, never as a normal result with an `error` key.
+27 tools (plus 16 deprecated aliases until 0.6.0) and 2 resource templates. Every tool carries MCP annotations (read-only / destructive hints), a typed output schema and per-parameter descriptions; failures are reported as tool errors, never as a normal result with an `error` key.
 
 ### 🔍 Discovery & terminal selection
 
@@ -80,19 +80,21 @@ For runtime trading, pair this with a live-trading MCP — they target different
 
 | Tool | Description |
 |------|-------------|
-| `tail_log` | Tail `Files/LiveLog.txt`, the daily `MQL5/Logs/YYYYMMDD.log`, or the newest tester log, optionally parsed into `{ts, source, message}` |
+| `tail_log` | Tail `Files/LiveLog.txt`, the daily Experts log `MQL5/Logs/YYYYMMDD.log`, the terminal Journal `logs/YYYYMMDD.log`, or the newest tester log; optionally parsed into `{ts, source, message}` (both the tab-separated and dated journal formats) |
 | `snapshot_sources` / `list_snapshots` | Freeze source files into a timestamped folder with a `manifest.json`; list them |
 
 ### 📡 MCP resources
 
 | URI | Description |
 |-----|-------------|
-| `mt5://log/{mode}` | Last 500 lines of `livelog`, `journal` or `tester` |
+| `mt5://log/{mode}` | Last 500 lines of `livelog`, `journal`, `terminal` or `tester` |
 | `mt5://report/{id}` | Full HTML of a report returned by `read_tester_report` / `get_backtest` (`latest` = newest on disk) |
 
-### Renamed in 0.5.0
+### Deprecated aliases (removed in 0.6.0)
 
-| Before | Now |
+The pre-0.5.0 tool names still work in 0.5.x as thin wrappers whose descriptions start with `DEPRECATED`. Set `MCP_MT5_LEGACY_TOOLS=0` to hide them and shrink the tool catalogue to the 27 tools above.
+
+| Deprecated name | Use instead |
 |---|---|
 | `syntax_check` | `compile(syntax_only=true)` |
 | `deploy_ea`, `install_include` | `deploy` |
@@ -168,6 +170,15 @@ Resolution priority for the MetaTrader install + data folder:
 | `MT5_DATA` | _(auto-detected)_ | `%APPDATA%\MetaQuotes\Terminal\<hash>` |
 | `MT5_TERMINAL_HASH` | _(auto-detected)_ | 32-char folder name |
 | `MT5_EDITION` | `mt5` | Set to `mt4` for MetaTrader 4 |
+
+### Running the server from WSL
+
+The server can run inside WSL and drive the Windows MetaTrader install through WSL interop.
+The install (`/mnt/c/Program Files/MetaTrader 5`) and the data folder (scanned under
+`/mnt/*/Users/*/AppData/Roaming/MetaQuotes/Terminal`, matched through `origin.txt`) are
+auto-detected; `MT5_INSTALL` / `MT5_DATA` override them. Paths handed to MetaEditor/terminal are
+translated with `wslpath -w` automatically. Interop must be enabled
+(`/etc/wsl.conf` `[interop] enabled=true`, then `wsl --shutdown`).
 
 ### MT4 support
 

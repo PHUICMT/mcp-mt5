@@ -2,9 +2,14 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+
+from .winpath import win_path
+
+_MNT_ROOT = Path("/mnt")  # WSL mount root; tests point this at a temp folder
 
 
 @dataclass(frozen=True)
@@ -56,6 +61,11 @@ class MT5Layout:
         return self.mql_root / "Logs"
 
     @property
+    def terminal_logs_dir(self) -> Path:
+        """The terminal's own Journal tab log (connection, tester launches), distinct from MQL5/Logs (Experts tab)."""
+        return self.data / "logs"
+
+    @property
     def tester_logs(self) -> Path:
         return self.data / "Tester" / "logs"
 
@@ -89,46 +99,64 @@ def _read_origin(terminal_dir: Path) -> Optional[str]:
         return None
 
 
-def find_terminal_for_install(install: Path) -> Optional[tuple[str, Path]]:
-    """Scan %APPDATA%\\MetaQuotes\\Terminal\\* for the data folder owned by `install`.
+def terminal_roots() -> list[Path]:
+    """Folders that hold `<hash>/origin.txt` terminal data dirs.
 
-    Returns (hash, data_dir) or None.
+    Windows: `%APPDATA%\\MetaQuotes\\Terminal`. WSL: the same folder of every Windows user
+    profile reachable under `/mnt/<drive>/Users/*` (APPDATA is not set inside WSL).
     """
+    roots: list[Path] = []
     appdata = os.environ.get("APPDATA")
-    if not appdata:
-        return None
-    base = Path(appdata) / "MetaQuotes" / "Terminal"
-    if not base.exists():
-        return None
+    if appdata:
+        roots.append(Path(appdata) / "MetaQuotes" / "Terminal")
+    elif sys.platform != "win32":                  # WSL: APPDATA is unset, look through the Windows profiles
+        for drive in sorted(_MNT_ROOT.glob("[a-z]")) if _MNT_ROOT.exists() else []:
+            users = drive / "Users"
+            if users.is_dir():
+                for user in users.iterdir():
+                    cand = user / "AppData" / "Roaming" / "MetaQuotes" / "Terminal"
+                    if cand.is_dir():
+                        roots.append(cand)
+    return [r for r in roots if r.exists()]
 
-    target = str(install).strip().lower()
-    for child in base.iterdir():
-        if not child.is_dir() or len(child.name) != 32:
-            continue
+
+def _iter_terminal_dirs():
+    for base in terminal_roots():
+        for child in sorted(base.iterdir()):
+            if child.is_dir() and len(child.name) in (16, 32):   # MT5 uses 32 chars, MT4 16
+                yield child
+
+
+def _same_install(origin: str, install: Path) -> bool:
+    """`origin.txt` always holds a Windows path; compare against both views of `install`."""
+    o = origin.strip().lower().rstrip("\\/")
+    candidates = {str(install).strip().lower().rstrip("\\/"), win_path(install).strip().lower().rstrip("\\/")}
+    return o in candidates
+
+
+def find_terminal_for_install(install: Path) -> Optional[tuple[str, Path]]:
+    """Find the terminal data folder whose origin.txt points at `install`. Returns (hash, data_dir) or None."""
+    for child in _iter_terminal_dirs():
         origin = _read_origin(child)
-        if origin and origin.strip().lower() == target:
+        if origin and _same_install(origin, install):
             return child.name, child
     return None
 
 
 def list_terminal_origins() -> list[dict]:
     """Enumerate all MetaTrader terminal data folders with their origin install path."""
-    appdata = os.environ.get("APPDATA")
-    if not appdata:
-        return []
-    base = Path(appdata) / "MetaQuotes" / "Terminal"
-    if not base.exists():
-        return []
-    out: list[dict] = []
-    for d in base.iterdir():
-        if not d.is_dir() or len(d.name) != 32:
-            continue
-        out.append({
-            "hash": d.name,
-            "origin": _read_origin(d),
-            "data_dir": str(d),
-        })
-    return out
+    return [{"hash": d.name, "origin": _read_origin(d), "data_dir": str(d)} for d in _iter_terminal_dirs()]
+
+
+def default_install(edition: str) -> Path:
+    """`C:\\Program Files\\MetaTrader 5` on Windows; its `/mnt/c/...` view when running under WSL."""
+    name = "MetaTrader 5" if edition == "mt5" else "MetaTrader 4"
+    if sys.platform != "win32":
+        for drive in sorted(_MNT_ROOT.glob("[a-z]")) if _MNT_ROOT.exists() else []:
+            cand = drive / "Program Files" / name
+            if cand.exists():
+                return cand
+    return Path(rf"C:\Program Files\{name}")
 
 
 def detect_layout(
@@ -138,14 +166,15 @@ def detect_layout(
     edition: str = "mt5",
 ) -> MT5Layout:
     """Resolve layout from explicit args, env, then auto-scan."""
-    install_p = Path(install or os.environ.get("MT5_INSTALL")
-                     or (r"C:\Program Files\MetaTrader 5" if edition == "mt5" else r"C:\Program Files\MetaTrader 4"))
-
     edition_env = os.environ.get("MT5_EDITION", edition)
     if edition_env in ("mt4", "mt5"):
         edition = edition_env
 
-    # Explicit data path wins
+    explicit_install = install or os.environ.get("MT5_INSTALL")
+    install_p = Path(explicit_install) if explicit_install else default_install(edition)
+
+    # Explicit data path wins (argument, then MT5_DATA env var)
+    data = data or os.environ.get("MT5_DATA")
     if data:
         data_p = Path(data)
         h = terminal_hash or os.environ.get("MT5_TERMINAL_HASH") or data_p.name
@@ -154,10 +183,9 @@ def detect_layout(
     # Explicit hash via env or arg
     h = terminal_hash or os.environ.get("MT5_TERMINAL_HASH")
     if h:
-        appdata = os.environ.get("APPDATA")
-        if appdata:
-            data_p = Path(appdata) / "MetaQuotes" / "Terminal" / h
-            return MT5Layout(install=install_p, data=data_p, terminal_hash=h, edition=edition)
+        for base in terminal_roots():
+            if (base / h).is_dir():
+                return MT5Layout(install=install_p, data=base / h, terminal_hash=h, edition=edition)
 
     # Auto-scan origin.txt
     found = find_terminal_for_install(install_p)

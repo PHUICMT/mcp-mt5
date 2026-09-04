@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 from .parsers import parse_compile_log, parse_tester_journal_notes, read_text_auto
+from .winpath import win_path
 from .workdir import workdir
 
 # PIDs of terminals launched by this module, so `kill_terminal` can target them precisely.
@@ -100,7 +101,7 @@ def run_terminal(terminal: Path, config: Path, timeout_sec: int,
     Returns (returncode or None on timeout, pid).
     """
     proc = subprocess.Popen(
-        [str(terminal), f"/config:{config}", *extra_args],
+        [str(terminal), f"/config:{win_path(config)}", *extra_args],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -139,7 +140,7 @@ def run_smoke(
     # 1. Compile
     work = workdir(src)
     log_path = work / f"{src.stem}.smoke.compile.log"
-    cmd = [str(layout.metaeditor), f"/compile:{src}", f"/include:{layout.mql_root}", f"/log:{log_path}"]
+    cmd = [str(layout.metaeditor), f"/compile:{win_path(src)}", f"/include:{win_path(layout.mql_root)}", f"/log:{win_path(log_path)}"]
     started = time.time()
     try:
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
