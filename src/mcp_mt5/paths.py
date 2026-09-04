@@ -66,6 +66,11 @@ class MT5Layout:
         return self.data / "logs"
 
     @property
+    def agent_logs_root(self) -> Path:
+        """Per-agent tester logs: %APPDATA%\\MetaQuotes\\Tester\\<hash>\\Agent-127.0.0.1-3000\\logs (a sibling tree of the data folder)."""
+        return self.data.parent.parent / "Tester" / self.terminal_hash
+
+    @property
     def tester_logs(self) -> Path:
         return self.data / "Tester" / "logs"
 

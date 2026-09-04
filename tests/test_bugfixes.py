@@ -354,7 +354,7 @@ def test_journal_notes_parser():
         "2026.09.04 10:00:00.000\tTester\tXAUUSD: tested with error\n"
     )
     out = parse_tester_journal_notes(text)
-    assert out["notes"]["history_begins"] == "2019.01.02"
+    assert out["notes"]["history_begins"] == "2019.01.02 00:00"
     assert out["notes"]["tested_with_error"] is True
     assert len(out["warnings"]) == 1
 
@@ -572,3 +572,65 @@ def test_wsl_autodetect_scans_mnt_and_matches_windows_origin(tmp_path: Path, mon
     L = paths.detect_layout()
     assert L.install == install and L.data == data and L.terminal_hash == "A" * 32
     assert paths.list_terminal_origins()[0]["hash"] == "A" * 32
+
+
+# --- found by running the real pipeline through WSL interop against MT5 build 6162 -------------------
+
+def test_syntax_check_result_line_lower_case_without_colon():
+    out = parse_compile_log(" : information: result 0 errors, 0 warnings, 84 ms elapsed, cpu='X64 Regular'")
+    assert out["ok"] is True and out["result_line_found"] is True
+
+
+def test_journal_notes_detect_history_sync_failure_and_success():
+    failed = ("OO\t2\t14:18:57.489\tCore 3\tpass 2 tested with error \"cannot synchronize history (EURUSD)\" in 0:00:00.001\n"
+              "XX\t0\t14:18:33.799\tTester\tlast test passed with result \"some error after pass finished\" in 0:00:00.000\n"
+              "YY\t0\t14:18:30.952\tAutoTesting\tEURUSD: preliminary downloading of M1 history completed in 0:00:00.344\n")
+    out = parse_tester_journal_notes(failed)
+    assert out["notes"]["history_sync_failed"].startswith("EURUSD")
+    assert out["notes"]["history_download"] == "M1 completed"
+    assert any("did not run" in w and "Run the backtest again" in w for w in out["warnings"])
+    ok = ("A\t0\t14:19:28.723\tCore 1\tEURUSD: history synchronized from 2025.01.01 to 2026.09.02\n"
+          "B\t0\t14:19:28.723\tCore 1\tfinal balance 10187.54 USD\n"
+          "C\t0\t14:19:28.723\tCore 1\tEURUSD,M15: 783 ticks, 204 bars generated. Test passed in 0:00:00.243.\n")
+    out = parse_tester_journal_notes(ok)
+    assert out["warnings"] == [] and out["notes"]["test_passed"] == "0:00:00.243." and out["notes"]["final_balance"].startswith("10187.54")
+
+
+def test_real_opt_layout_offsets(tmp_path: Path):
+    """Descriptors start right after the fixed header; header_size covers descriptors + common buffer."""
+    f = tmp_path / "x.opt"
+    _build_opt_file(f, [(i, float(i), 5) for i in range(3)])
+    raw = bytearray(f.read_bytes())
+    # rewrite header_size the way MT5 does (struct + descriptors + parameters_size) and confirm parsing still works
+    hs = optimization.HEADER_SIZE + 2 * optimization.INPUT_SIZE + 8
+    struct.pack_into("<I", raw, struct.calcsize("<I128s32s66i"), hs)  # header_size slot follows version/copyright/name/reserve
+    f.write_bytes(raw)
+    out = optimization.parse_opt_file(f)
+    assert out["header"]["header_size"] == hs and out["pass_count"] == 3 and out["passes"][2]["inputs"] == {"InpPeriod": 5}
+
+
+def test_run_registry_reads_only_appended_log_text(fake_layout, tmp_path: Path, monkeypatch):
+    import anyio
+    log = fake_layout.tester_logs / "20260904.log"
+    log.write_bytes(b"\xff\xfe" + "AA\t0\t10:00:00.000\tCore 1\tpass 1 tested with error \"cannot synchronize history (EURUSD)\"\n".encode("utf-16-le"))
+    cfg = tmp_path / "t.ini"
+    cfg.write_text("[Tester]\nExpert=X\nReport=rep\n", encoding="utf-8")
+
+    class FakeProc:
+        pid = 5
+
+        def __init__(self, cmd, **kw):
+            with open(log, "ab") as fh:  # this run appends a clean pass
+                fh.write("BB\t0\t10:05:00.000\tCore 1\tfinal balance 10100.00 USD\nCC\t0\t10:05:00.100\tCore 1\tTest passed in 0:00:00.200.\n".encode("utf-16-le"))
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(subprocess, "Popen", FakeProc)
+    out = anyio.run(server.run_backtest_impl, str(cfg), True, 60, False, None, 0.01)
+    assert out["warnings"] == []                     # the earlier failure in the same daily file is ignored
+    assert out["journal_notes"]["test_passed"] == "0:00:00.200."
+    assert "retried_after_history_sync" not in out

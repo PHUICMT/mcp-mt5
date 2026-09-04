@@ -180,9 +180,12 @@ def parse_opt_file(path: str | Path, max_passes: int = 100_000) -> dict:
         }
 
     kind = _record_kind(header)
-    body = max(header["header_size"], HEADER_SIZE)
-    inputs = _parse_inputs(raw, body, header["parameters_total"])
-    pos = body + header["parameters_total"] * INPUT_SIZE + header["parameters_size"] + header["snapshot_size"] * 4
+    # Verified on a real cache: the input descriptors follow the fixed struct immediately (offset 1442);
+    # `header_size` already covers struct + descriptors + the common-parameter buffer, and the pass
+    # records start right after the snapshot ints that follow it.
+    inputs = _parse_inputs(raw, HEADER_SIZE, header["parameters_total"])
+    pos = max(header["header_size"], HEADER_SIZE + header["parameters_total"] * INPUT_SIZE + header["parameters_size"]) \
+        + header["snapshot_size"] * 4
     result = {
         "path": str(p),
         "format": SIGNATURE,

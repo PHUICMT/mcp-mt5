@@ -41,7 +41,7 @@ For runtime trading, pair this with a live-trading MCP — they target different
 
 | Tool | Description |
 |------|-------------|
-| `compile` | MetaEditor CLI on a `.mq4`/`.mq5`/`.mqh`. `ok` requires a `Result:` line with 0 errors **and** a freshly written binary. `syntax_only=true` uses `/s` for a fast check without a binary |
+| `compile` | MetaEditor CLI on a `.mq4`/`.mq5`/`.mqh`. `ok` requires a `Result:` line with 0 errors **and** a freshly written binary (MetaEditor's exit code is 1 even on success and is ignored). `syntax_only=true` uses `/s` for a fast check without a binary |
 | `compile_and_deploy` | Compile, then copy the fresh `.ex4`/`.ex5` into `Experts/` |
 | `deploy` | Copy a compiled binary into `Experts/` or a `.mqh` into `Include/`, chosen by extension |
 | `smoke_test` | Compile + deploy + 1-day headless backtest + journal scan for runtime errors |
@@ -69,7 +69,7 @@ For runtime trading, pair this with a live-trading MCP — they target different
 |------|-------------|
 | `patch_tester_ini` | Update `Section.Key` values in a `tester.ini` in place (encoding preserved) |
 | `gen_tester_inputs` | Build a `[TesterInputs]` block from the EA's inputs, optionally written into an ini |
-| `run_backtest` | Launch `terminal64.exe /config:tester.ini`, wait for `ShutdownTerminal=1`, stream progress notifications, return `report_path`, `report_uri`, tester log and journal notes (e.g. `start_time_changed`) |
+| `run_backtest` | Launch `terminal64.exe /config:tester.ini`, wait for `ShutdownTerminal=1`, stream progress notifications, return `report_path`, `report_uri`, tester log and journal notes (`history_synchronized`, `final_balance`, `test_passed`, `start_time_changed`…). Retries once when the tester started before the history download finished |
 | `start_backtest` / `get_backtest` / `cancel_backtest` | Background runs: launch and get a `run_id` immediately, poll status (or list all runs), kill. Runs persist to `.mt5tmp/runs/` |
 | `read_tester_report` | Parse an MT5/MT4 report into a ~50-field `summary`; `response_format="detailed"` adds every trade row. The HTML itself is served as the `mt5://report/{id}` resource |
 | `compare_reports` | Diff two reports key by key with absolute/percent deltas; pass `guards` to get `violations`/`ok` |

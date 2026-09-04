@@ -84,7 +84,13 @@ def scan_journal_for_errors(log_path: Path) -> dict:
     """Read a tester journal and return matched error lines (with benign lines filtered)."""
     if not log_path.exists():
         return {"error": f"log not found: {log_path}", "matches": []}
-    text = read_text_auto(log_path)
+    out = scan_journal_text(read_text_auto(log_path))
+    out["log_path"] = str(log_path)
+    return out
+
+
+def scan_journal_text(text: str) -> dict:
+    """Match runtime-error patterns in journal text (benign lines filtered)."""
     matches: list[dict] = []
     for i, line in enumerate(text.splitlines(), 1):
         if any(p.search(line) for p in _BENIGN_PATTERNS):
@@ -93,7 +99,7 @@ def scan_journal_for_errors(log_path: Path) -> dict:
             if pat.search(line):
                 matches.append({"line": i, "text": line.strip(), "rule": pat.pattern})
                 break
-    return {"matches": matches, "match_count": len(matches), "log_path": str(log_path)}
+    return {"matches": matches, "match_count": len(matches)}
 
 
 def run_terminal(terminal: Path, config: Path, timeout_sec: int,
@@ -174,35 +180,57 @@ def run_smoke(
     cfg = work / f"{src.stem}.smoke.ini"
     write_smoke_tester_ini(ea_name, cfg, symbol=symbol, period=period, days=days)
 
-    # 4. Run terminal
+    # 4. Run terminal (remember log sizes first: tester logs are daily files shared by every run)
+    folders = [layout.tester_logs, getattr(layout, "agent_logs_root", layout.tester_logs)]
+    offsets = {str(f): f.stat().st_size for d in folders if d.exists() for f in d.rglob("*.log")}
     start = time.time()
     rc, _pid = run_terminal(layout.terminal, cfg, timeout_sec)
     elapsed = round(time.time() - start, 2)
     if rc is None:
         return {"ok": False, "stage": "backtest", "error": f"terminal timeout after {timeout_sec}s"}
 
-    # 5. Scan journal (only logs written by this run)
-    journal = None
-    if layout.tester_logs.exists():
-        logs = [p for p in layout.tester_logs.glob("*.log") if p.stat().st_mtime >= start - 1]
-        logs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        if logs:
-            journal = logs[0]
-
-    if not journal:
+    # 5. Scan only what this run appended to the journals
+    journal, text = _appended_log_text(folders, offsets, start)
+    if journal is None:
         return {"ok": False, "stage": "journal", "error": "no tester log produced", "elapsed_sec": elapsed}
 
-    scan = scan_journal_for_errors(journal)
-    notes = parse_tester_journal_notes(read_text_auto(journal))
+    scan = scan_journal_text(text)
+    notes = parse_tester_journal_notes(text)
     return {
         "ok": scan["match_count"] == 0 and not notes["warnings"],
         "stage": "complete",
         "elapsed_sec": elapsed,
         "expert": ea_name,
         "symbol": symbol,
-        "tester_log": str(journal),
+        "tester_log": journal,
         "errors_found": scan["match_count"],
         "errors_sample": scan["matches"][:20],
         "journal_notes": notes["notes"],
         "warnings": notes["warnings"],
     }
+
+
+def _appended_log_text(folders: list[Path], offsets: dict[str, int], start: float) -> tuple[Optional[str], str]:
+    newest: Optional[Path] = None
+    pieces: list[str] = []
+    for d in folders:
+        if not d.exists():
+            continue
+        for f in d.rglob("*.log"):
+            try:
+                if f.stat().st_mtime < start - 1:
+                    continue
+                raw = f.read_bytes()
+            except OSError:
+                continue
+            off = offsets.get(str(f), 0)
+            delta = raw[off:]
+            if not delta:
+                continue
+            enc = "utf-16-le" if raw[:2] == b"\xff\xfe" or b"\x00" in delta[:200] else "utf-8"
+            if enc == "utf-16-le" and off % 2:
+                delta = delta[1:]
+            pieces.append(delta.decode(enc, errors="replace"))
+            if newest is None or f.stat().st_mtime > newest.stat().st_mtime:
+                newest = f
+    return (str(newest) if newest else None), "\n".join(pieces)

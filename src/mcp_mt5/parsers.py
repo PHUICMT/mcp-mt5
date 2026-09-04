@@ -83,7 +83,9 @@ def write_text_preserving(path: Path, text: str, default_encoding: str = "utf-8"
 _DIAG_RE = re.compile(
     r"^(?P<file>.*?)\((?P<line>\d+),(?P<col>\d+)\)\s*:\s*(?P<sev>error|warning)\s+(?P<code>\d+):\s*(?P<msg>.*)$"
 )
-_RESULT_RE = re.compile(r"Result:\s*(\d+)\s*errors?,\s*(\d+)\s*warnings?", re.IGNORECASE)
+# Full compile: "Result: 0 errors, 0 warnings, 1302 ms elapsed, cpu='X64 Regular'"
+# Syntax check (/s): " : information: result 0 errors, 0 warnings, 84 ms elapsed"
+_RESULT_RE = re.compile(r"\bresult:?\s*(\d+)\s*errors?,\s*(\d+)\s*warnings?", re.IGNORECASE)
 
 
 def parse_compile_log(text: str) -> dict:
@@ -289,9 +291,15 @@ def iter_journal_lines(text: str, date: str | None = None) -> Iterator[dict]:
 
 _JOURNAL_NOTE_PATTERNS = {
     "start_time_changed": re.compile(r"start time changed to\s+(.+?)\s+to provide data", re.IGNORECASE),
-    "history_begins": re.compile(r"history data begins from\s+(\S+)", re.IGNORECASE),
+    "history_begins": re.compile(r"history (?:data )?begins from\s+(\S+(?:\s+\d{2}:\d{2})?)", re.IGNORECASE),
+    "history_synchronized": re.compile(r"history synchronized from\s+(\S+)\s+to\s+(\S+)", re.IGNORECASE),
     "real_ticks_begin": re.compile(r"real ticks begin from\s+(\S+)", re.IGNORECASE),
-    "tested_with_error": re.compile(r"tested with error", re.IGNORECASE),
+    "tested_with_error": re.compile(r"tested with error\s*\"?([^\"\n]*)", re.IGNORECASE),
+    "pass_error": re.compile(r"last test passed with result\s+\"([^\"]+)\"", re.IGNORECASE),
+    "history_sync_failed": re.compile(r"cannot synchronize history\s*\(?([^)\n]*)\)?", re.IGNORECASE),
+    "history_download": re.compile(r"preliminary downloading of (\S+) history (started|completed)", re.IGNORECASE),
+    "test_passed": re.compile(r"Test passed in\s+(\S+)", re.IGNORECASE),
+    "final_balance": re.compile(r"final balance\s+([\d.,]+\s*\w+)", re.IGNORECASE),
     "log_file_written": re.compile(r'log file "([^"]+)" written', re.IGNORECASE),
     "history_quality": re.compile(r"history quality\s+(\d+(?:\.\d+)?)\s*%", re.IGNORECASE),
 }
@@ -311,13 +319,26 @@ def parse_tester_journal_notes(text: str) -> dict:
             m = pat.search(line)
             if not m:
                 continue
-            value = m.group(1).strip() if m.groups() else True
-            notes.setdefault(key, value)
+            groups = [g.strip() for g in m.groups() if g is not None]
+            value = (groups[0] if len(groups) == 1 else " ".join(groups)) if groups else True
+            if value == "":
+                value = True
+            if key == "history_download":
+                notes[key] = value           # keep the last state (started -> completed)
+            else:
+                notes.setdefault(key, value)
     if "start_time_changed" in notes:
         warnings.append(
             f"tester moved the start date to {notes['start_time_changed']} because history was "
             "insufficient; the report does not cover the requested FromDate"
         )
-    if notes.get("tested_with_error"):
-        warnings.append("tester journal reports 'tested with error'")
+    if "history_sync_failed" in notes or (notes.get("pass_error") and "error" in str(notes["pass_error"])):
+        detail = notes.get("history_sync_failed") or notes.get("pass_error")
+        warnings.append(
+            f"the test did not run: {detail}. This happens on the first headless start after login, while the "
+            "terminal is still downloading history; the report (if any) contains zeros. Run the backtest again."
+        )
+    elif notes.get("tested_with_error"):
+        detail = notes["tested_with_error"]
+        warnings.append("tester journal reports 'tested with error'" + (f": {detail}" if detail is not True else ""))
     return {"notes": notes, "warnings": warnings}

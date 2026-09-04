@@ -19,6 +19,13 @@ context per call, and every tool now behaves the way MCP clients expect.
 - `resolve_includes` does far fewer filesystem round-trips (WSL `/mnt/c` was 4 s per EA).
 - WSL support: paths passed to MetaEditor/terminal are translated with `wslpath -w` when the server runs under WSL against `/mnt/<drive>/...`.
 
+### Verified end to end against MetaTrader 5 build 6162 (compile → deploy → backtest → report → optimisation → `.opt`)
+- `.opt` reader corrected on a real cache: input descriptors follow the fixed header, pass records start at `header_size + snapshot`; all 6 passes, their inputs and statistics parse exactly.
+- `compile(syntax_only=true)`: MetaEditor's `/s` log writes `result 0 errors` (lower case, no colon); the parser now accepts both spellings. MetaEditor's exit code is 1 even on success and is ignored.
+- First headless start after login: the tester begins before the history download finishes and reports `cannot synchronize history`; `run_backtest` detects this and retries once (`retried_after_history_sync`), and the warning explains it otherwise.
+- Tester/agent logs are daily files shared by every run; runs now remember the log sizes at launch and only read what they appended, so an earlier failure no longer poisons `smoke_test` or `journal_notes`. Agent logs under `%APPDATA%\MetaQuotes\Tester\<hash>\Agent-*\logs` are included (`history_synchronized`, `final_balance`, `test_passed`, `history_sync_failed`, `pass_error` notes).
+- Run status is published only after the report path and notes are collected (a fast poller could see `completed` with no result).
+
 ### Added
 - Typed output (`outputSchema` / `structuredContent`) for every tool; `ToolAnnotations` (read-only / destructive hints) on every tool; per-parameter descriptions; server `instructions` describing the pipeline.
 - `run_backtest` is async and streams progress notifications while waiting.

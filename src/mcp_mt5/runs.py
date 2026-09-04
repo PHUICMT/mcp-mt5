@@ -36,6 +36,7 @@ class Run:
     timeout_sec: int = 1800
     result: dict = field(default_factory=dict)
     error: Optional[str] = None
+    log_offsets: dict = field(default_factory=dict)   # log path -> size in bytes when the run started
 
     @property
     def elapsed_sec(self) -> float:
@@ -69,9 +70,16 @@ class RunRegistry:
 
     # -- lifecycle -------------------------------------------------------------------
     def start(self, terminal: Path, config: Path, timeout_sec: int, extra_args: tuple[str, ...],
-              finalize: Finalizer) -> Run:
+              finalize: Finalizer, watch_logs: tuple[Path, ...] = ()) -> Run:
         cmd = [str(terminal), f"/config:{win_path(config)}", *extra_args]
         run = Run(run_id=uuid.uuid4().hex[:12], config=str(config), cmd=cmd, timeout_sec=timeout_sec)
+        for folder in watch_logs:
+            if folder.exists():
+                for f in folder.rglob("*.log"):
+                    try:
+                        run.log_offsets[str(f)] = f.stat().st_size
+                    except OSError:
+                        pass
         try:
             proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except OSError as e:
@@ -92,22 +100,23 @@ class RunRegistry:
     def _watch(self, run: Run, proc: subprocess.Popen, finalize: Finalizer) -> None:
         try:
             run.returncode = proc.wait(timeout=run.timeout_sec)
-            if run.status == "running":
-                run.status = "completed"
+            outcome = "completed"
         except subprocess.TimeoutExpired:
             proc.kill()
-            run.status = "timeout"
             run.returncode = -1
-        finally:
-            run.finished = time.time()
-            _smoke.spawned_pids.discard(proc.pid)
-            with self._lock:
-                self._procs.pop(run.run_id, None)
-            try:
-                run.result = finalize(run)
-            except Exception as e:  # pragma: no cover - defensive
-                run.error = f"finalize failed: {e}"
-            self._save(run)
+            outcome = "timeout"
+        run.finished = time.time()
+        _smoke.spawned_pids.discard(proc.pid)
+        with self._lock:
+            self._procs.pop(run.run_id, None)
+        try:
+            run.result = finalize(run)
+        except Exception as e:  # pragma: no cover - defensive
+            run.error = f"finalize failed: {e}"
+        # Status flips last, so anyone polling `status` sees the result and notes at the same time.
+        if run.status == "running":
+            run.status = outcome
+        self._save(run)
 
     def cancel(self, run_id: str) -> Run:
         run = self.get(run_id)

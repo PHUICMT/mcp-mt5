@@ -267,21 +267,42 @@ def compile(
     }
 
 
+def _new_log_text(run: Run, folders: list[Path]) -> tuple[Optional[str], str]:
+    """Text appended to the tester logs since the run started (daily files are shared by all runs)."""
+    newest: Optional[Path] = None
+    pieces: list[str] = []
+    for folder in folders:
+        if not folder.exists():
+            continue
+        for f in folder.rglob("*.log"):
+            try:
+                if f.stat().st_mtime < run.started - 1:
+                    continue
+                raw = f.read_bytes()
+            except OSError:
+                continue
+            offset = run.log_offsets.get(str(f), 0)
+            delta = raw[offset:] if offset < len(raw) else b""
+            if not delta and offset:
+                continue
+            enc = "utf-16-le" if raw[:2] == b"\xff\xfe" or (b"\x00" in delta[:200]) else "utf-8"
+            if enc == "utf-16-le" and offset % 2:
+                delta = delta[1:]
+            pieces.append(delta.decode(enc, errors="replace"))
+            if newest is None or f.stat().st_mtime > newest.stat().st_mtime:
+                newest = f
+    return (str(newest) if newest else None), "\n".join(pieces)
+
+
 def _finalize_run(L: MT5Layout, cfg: Path, portable: bool) -> "Callable[[Run], dict]":
     """Build the callback that collects report path + journal notes once a terminal exits."""
     def _collect(run: Run) -> dict:
         start = run.started
-        latest_log = None
-        journal: dict = {"notes": {}, "warnings": []}
-        if L.tester_logs.exists():
-            logs = [p for p in L.tester_logs.glob("*.log") if p.stat().st_mtime >= start - 1]
-            logs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-            if logs:
-                latest_log = str(logs[0])
-                try:
-                    journal = parse_tester_journal_notes(read_text_auto(logs[0]))
-                except Exception as e:  # pragma: no cover
-                    journal = {"notes": {}, "warnings": [f"journal parse failed: {e}"]}
+        latest_log, text = _new_log_text(run, [L.tester_logs, L.agent_logs_root, L.terminal_logs_dir])
+        try:
+            journal = parse_tester_journal_notes(text) if text else {"notes": {}, "warnings": []}
+        except Exception as e:  # pragma: no cover
+            journal = {"notes": {}, "warnings": [f"journal parse failed: {e}"]}
         expected = _report_path_from_ini(cfg, L, portable=portable)
         report_path = None
         if expected is not None and expected.exists() and expected.stat().st_mtime >= start - 1:
@@ -332,7 +353,8 @@ def _start_run(config: str, portable: bool, timeout_sec: int) -> Run:
     if not L.terminal.exists():
         raise ToolError(f"terminal missing: {L.terminal}")
     extra = ("/portable",) if portable else ()
-    run = _runs.start(L.terminal, cfg, timeout_sec, extra, finalize=_finalize_run(L, cfg, portable))
+    run = _runs.start(L.terminal, cfg, timeout_sec, extra, finalize=_finalize_run(L, cfg, portable),
+                      watch_logs=(L.tester_logs, L.agent_logs_root, L.terminal_logs_dir))
     if run.status == "failed":
         raise ToolError(f"could not launch terminal: {run.error}")
     return run
@@ -340,7 +362,24 @@ def _start_run(config: str, portable: bool, timeout_sec: int) -> Run:
 
 async def run_backtest_impl(config: str, wait: bool = True, timeout_sec: int = 1800, portable: bool = False,
                             progress: "Callable[[float, float, str], Awaitable[None]] | None" = None,
-                            poll_sec: float = 5.0) -> dict[str, Any]:
+                            poll_sec: float = 5.0, retry_on_history_sync: bool = True) -> dict[str, Any]:
+    view = await _run_once(config, wait, timeout_sec, portable, progress, poll_sec)
+    notes = view.get("journal_notes") or {}
+    if (wait and retry_on_history_sync and view.get("status") == "completed"
+            and ("history_sync_failed" in notes or "error" in str(notes.get("pass_error", "")))):
+        # First headless start after login: the tester began before the history download finished.
+        # The download has now happened, so one retry normally succeeds.
+        if progress:
+            await progress(0.0, float(timeout_sec), "history was still downloading; retrying the backtest once")
+        retry = await _run_once(config, wait, timeout_sec, portable, progress, poll_sec)
+        retry["retried_after_history_sync"] = True
+        retry["first_attempt"] = {"run_id": view["run_id"], "warnings": view.get("warnings", [])}
+        return retry
+    return view
+
+
+async def _run_once(config: str, wait: bool, timeout_sec: int, portable: bool,
+                    progress: "Callable[[float, float, str], Awaitable[None]] | None", poll_sec: float) -> dict[str, Any]:
     run = _start_run(config, portable, timeout_sec)
     if progress:
         await progress(0.0, float(timeout_sec), f"terminal launched (pid {run.pid}); waiting for ShutdownTerminal")
@@ -372,7 +411,8 @@ async def run_backtest(
     Requires the EA to be deployed first (`compile_and_deploy` / `deploy_ea`) and
     `ShutdownTerminal=1` in the ini, otherwise the call runs until `timeout_sec`.
     Typically 1-30 minutes; progress notifications are sent every few seconds while waiting.
-    For long runs prefer `start_backtest` + `get_backtest`. Returns `run_id`, `report_path`
+    If the tester reports "cannot synchronize history" (first headless start after login), the run
+    is retried once automatically. For long runs prefer `start_backtest` + `get_backtest`. Returns `run_id`, `report_path`
     (resolved from `Report=` in the ini), `latest_tester_log` and `journal_notes`/`warnings`;
     if `warnings` mentions `start_time_changed` the tester moved FromDate because history was
     missing, so the report is not comparable with other runs.
