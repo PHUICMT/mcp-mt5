@@ -177,11 +177,10 @@ def test_top_passes_uses_all_passes_not_sample(fake_layout, tmp_path: Path):
     f = fake_layout.tester_dir / "cache" / "MyEA.EURUSD.M15.20240101.20241231.00.ABCDEF.opt"
     # best pass is #59, which the old 50-pass sample never saw
     _build_opt_file(f, [(i, float(100 * i), 5 + i) for i in range(60)])
-    out = server.top_passes(criterion="profit", n=1)
+    out = server.read_optimization(criterion="profit", top_n=1)
     assert out["pass_count"] == 60
     assert out["top"][0]["pass"] == 59
-    sample = server.parse_optimization()
-    assert len(sample["passes_sample"]) == 50 and "passes" not in sample
+    assert "passes" not in out  # full list stays server-side; only the ranking is returned
 
 
 def test_find_latest_opt_filters_by_name(tmp_path: Path):
@@ -294,7 +293,7 @@ def test_run_backtest_detaches_stdio_and_reports_journal(fake_layout, tmp_path: 
     assert 4242 not in server._spawned_pids  # released after exit
     assert len(progress) >= 2 and progress[-1][2].startswith("terminal exited")
     assert server.get_backtest(out["run_id"])["status"] == "completed"
-    assert any(r["run_id"] == out["run_id"] for r in server.list_backtests()["runs"])
+    assert any(r["run_id"] == out["run_id"] for r in server.get_backtest()["runs"])
 
 
 def test_start_backtest_returns_immediately_and_can_be_cancelled(fake_layout, tmp_path: Path, monkeypatch):

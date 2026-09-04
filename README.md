@@ -27,94 +27,82 @@ For runtime trading, pair this with a live-trading MCP — they target different
 
 ## Tools
 
-The server exposes 39 tools and 4 MCP resources across nine categories.
+27 tools and 2 resource templates. Every tool carries MCP annotations (read-only / destructive hints), a typed output schema and per-parameter descriptions; failures are reported as tool errors, never as a normal result with an `error` key.
 
 ### 🔍 Discovery & terminal selection
 
 | Tool | Description |
 |------|-------------|
-| `env_info` | Dump resolved paths, terminal hash, edition, and missing-component issues |
-| `list_terminals` | Enumerate every MT4/5 terminal data folder under `%APPDATA%\MetaQuotes\Terminal` along with each `origin.txt` install path |
-| `select_terminal` | Switch the active terminal data folder mid-session by origin path, hash, or install dir — handy for testing across multiple brokers |
+| `env_info` | Resolved paths, terminal hash, edition, and missing-component issues |
+| `list_terminals` | Every MT4/5 terminal data folder under `%APPDATA%\MetaQuotes\Terminal` with its `origin.txt` install path |
+| `select_terminal` | Switch the active terminal data folder mid-session by origin path, hash, or install dir |
 
 ### 🔨 Build & deploy
 
 | Tool | Description |
 |------|-------------|
-| `compile` | Invoke MetaEditor CLI on a `.mq4`/`.mq5`/`.mqh` source. Returns structured `errors[]`/`warnings[]` (file, line, column, error code, message) plus log excerpt |
-| `compile_and_deploy` | Compile, then copy the resulting `.ex4`/`.ex5` into the terminal's `Experts/` folder in one call |
-| `syntax_check` | Same as `compile` but uses MetaEditor's `/s` syntax-only mode for faster feedback |
-| `smoke_test` | Compile + deploy + run a 1-day headless backtest + scan the journal for runtime errors. Catches problems that pass `compile` but fail at runtime |
-| `deploy_ea` | Copy a compiled binary into `Experts/` (with optional rename) |
-| `install_include` | Copy a `.mqh` header into the terminal `Include/` folder — handy for libraries like `LiveLog.mqh` |
-| `list_experts` | Enumerate `Experts/` recursively with size and modification time |
+| `compile` | MetaEditor CLI on a `.mq4`/`.mq5`/`.mqh`. `ok` requires a `Result:` line with 0 errors **and** a freshly written binary. `syntax_only=true` uses `/s` for a fast check without a binary |
+| `compile_and_deploy` | Compile, then copy the fresh `.ex4`/`.ex5` into `Experts/` |
+| `deploy` | Copy a compiled binary into `Experts/` or a `.mqh` into `Include/`, chosen by extension |
+| `smoke_test` | Compile + deploy + 1-day headless backtest + journal scan for runtime errors |
+| `list_experts` | Enumerate `Experts/` (defaults to `*.ex5` on MT5, `*.ex4` on MT4) |
 
-### 🔎 Source analysis
+### 🔎 Source analysis & lint
 
 | Tool | Description |
 |------|-------------|
-| `extract_inputs` | Parse `input <type> <name> = <default>;` declarations into structured records |
-| `gen_tester_inputs` | Auto-build a `[TesterInputs]` block from EA source (translates `PERIOD_*` enums to numeric codes), optionally write into an existing `tester.ini` |
-| `resolve_includes` | Recursive `#include` resolution that reports missing files and circular references |
-| `find_symbol` | Grep a symbol across MQL files, skipping comments and string literals |
-| `code_metrics` | LOC, function count, max nesting per file — or aggregated across an entire tree |
-| `extract_doc` | Pull MetaEditor `//+--+ //\| ... +--+` doc blocks out as markdown |
-| `find_magic_collision` | Detect duplicate magic-number assignments across the project |
+| `inspect_source` | `input` declarations, `#include` tree with missing files, MetaEditor doc blocks, whole-word symbol search, duplicate magic numbers (`aspects=[...]`) |
+| `analyze_mql` | Structural lint (missing `OnInit`/`OnTick`, unused inputs, hardcoded magic/symbol), MT4-style deprecated calls with MT5 replacements, LOC/function/nesting metrics (`checks=[...]`) |
+| `validate_tester_ini` | Required keys, date format, numeric ranges; cross-checks `[TesterInputs]` against the EA source |
 
-### ⚠️ Lint & validation
+### ✏️ Format & refactor
 
 | Tool | Description |
 |------|-------------|
-| `lint_basic` | Structural rules: missing `OnInit`/`OnDeinit`, unused `input`s, hardcoded magic numbers, hardcoded symbol literals |
-| `check_deprecated` | Flag MT4-style API calls (`OrderSend`, `Ask`, `AccountBalance`, …) with `CTrade`/MT5-API replacement suggestions |
-| `validate_tester_ini` | Sanity-check a `tester.ini` (required keys, date format, numeric ranges) and cross-check `[TesterInputs]` against the EA source declarations |
-
-### 🎨 Format
-
-| Tool | Description |
-|------|-------------|
-| `format_mql` | Format a source file via `clang-format` (MQL literals such as `D'…'`/`C'…'` and `input group` lines are protected). Dry run unless `write=true` |
-| `format_check` | Same as above but reports whether changes are needed without writing the file |
-
-### ✏️ Refactor
-
-| Tool | Description |
-|------|-------------|
-| `rename_symbol` | Whole-word rename across all MQL files in a tree, with `dry_run` preview |
-| `extract_function` | Brace-aware extraction of a contiguous block into a new helper function — inline or into an external `.mqh` |
+| `format_mql` | `clang-format` with MQL literals (`D'…'`, `C'…'`) and `input group`/`#property` lines protected. Dry run unless `write=true`; keeps the file's encoding |
+| `rename_symbol` | Whole-word rename across a tree, `dry_run` by default |
+| `extract_function` | Brace-aware extraction of a line range into a helper (inline or into a `.mqh`), `dry_run` by default |
 
 ### 📊 Strategy Tester
 
 | Tool | Description |
 |------|-------------|
-| `patch_tester_ini` | Programmatically update keys in a `tester.ini` (e.g. `Tester.Symbol`, `Tester.FromDate`, `TesterInputs.RiskPct`) before running |
-| `run_backtest` | Launch `terminal64.exe /config:tester.ini`, wait for `ShutdownTerminal=1`, stream progress notifications, and return `report_path`, tester log and journal notes (e.g. `start_time_changed`) |
-| `start_backtest` / `get_backtest` / `cancel_backtest` / `list_backtests` | Background runs: launch and return a `run_id` immediately, poll status and journal tail, kill, list. Runs persist to `.mt5tmp/runs/` |
-| `parse_optimization` | Best-effort parser for the latest `.opt` (optimization passes) binary file |
-| `top_passes` | Sort optimization passes by a chosen criterion and return the top *N* |
-| `read_tester_report` | Parse an MT5/MT4 tester HTML report into a structured `summary` (~50 fields: net profit, profit factor, balance/equity drawdown, Sharpe, History Quality, trade counts…). `response_format="detailed"` adds every trade row; the raw HTML is served as the `mt5://report/{id}` resource instead of inline |
-| `compare_reports` | Diff two tester reports key-by-key with absolute and percent deltas |
-| `regression_check` | Verify a candidate report stays within guard thresholds vs a baseline (e.g. "net_profit may not drop more than 5%") |
-| `kill_terminal` | Kill terminals launched by this server (or every instance with `all_instances=true`) |
+| `patch_tester_ini` | Update `Section.Key` values in a `tester.ini` in place (encoding preserved) |
+| `gen_tester_inputs` | Build a `[TesterInputs]` block from the EA's inputs, optionally written into an ini |
+| `run_backtest` | Launch `terminal64.exe /config:tester.ini`, wait for `ShutdownTerminal=1`, stream progress notifications, return `report_path`, `report_uri`, tester log and journal notes (e.g. `start_time_changed`) |
+| `start_backtest` / `get_backtest` / `cancel_backtest` | Background runs: launch and get a `run_id` immediately, poll status (or list all runs), kill. Runs persist to `.mt5tmp/runs/` |
+| `read_tester_report` | Parse an MT5/MT4 report into a ~50-field `summary`; `response_format="detailed"` adds every trade row. The HTML itself is served as the `mt5://report/{id}` resource |
+| `compare_reports` | Diff two reports key by key with absolute/percent deltas; pass `guards` to get `violations`/`ok` |
+| `read_optimization` | Read a `Tester/cache/*.opt` cache using the layout MetaQuotes published: header, optimised inputs, and the top N passes by any criterion over **all** passes |
+| `kill_terminal` | Kill terminals launched by this server (`all_instances=true` for every instance) |
 
 ### 📝 Logs & snapshots
 
 | Tool | Description |
 |------|-------------|
-| `tail_log` | Tail the last *N* lines of either `Files/LiveLog.txt`, the daily `Logs/YYYYMMDD.log`, or the most recent tester log. Optional structured parse into `{ts, source, message}` records |
-| `snapshot_sources` | Freeze a copy of source files into a timestamped folder with a `manifest.json` |
-| `list_snapshots` | Enumerate previously captured snapshots |
+| `tail_log` | Tail `Files/LiveLog.txt`, the daily `MQL5/Logs/YYYYMMDD.log`, or the newest tester log, optionally parsed into `{ts, source, message}` |
+| `snapshot_sources` / `list_snapshots` | Freeze source files into a timestamped folder with a `manifest.json`; list them |
 
 ### 📡 MCP resources
 
-Live, re-readable URIs that an MCP client can poll instead of calling a tool repeatedly.
-
 | URI | Description |
 |-----|-------------|
-| `mt5://livelog` | Latest tail of `MQL5/Files/LiveLog.txt` |
-| `mt5://journal` | Today's daily MT5 journal log |
-| `mt5://tester-log` | Most recent Strategy Tester journal |
-| `mt5://report/{id}` | Full HTML of a report returned by `read_tester_report` / `get_backtest` (`mt5://report/latest` = newest on disk) |
+| `mt5://log/{mode}` | Last 500 lines of `livelog`, `journal` or `tester` |
+| `mt5://report/{id}` | Full HTML of a report returned by `read_tester_report` / `get_backtest` (`latest` = newest on disk) |
+
+### Renamed in 0.5.0
+
+| Before | Now |
+|---|---|
+| `syntax_check` | `compile(syntax_only=true)` |
+| `deploy_ea`, `install_include` | `deploy` |
+| `extract_inputs`, `resolve_includes`, `extract_doc`, `find_symbol`, `find_magic_collision` | `inspect_source` |
+| `lint_basic`, `check_deprecated`, `code_metrics` | `analyze_mql` |
+| `format_check` | `format_mql` (dry run by default) |
+| `parse_optimization`, `top_passes` | `read_optimization` |
+| `regression_check` | `compare_reports(guards=…)` |
+| `list_backtests` | `get_backtest()` without `run_id` |
+| `mt5://livelog`, `mt5://journal`, `mt5://tester-log` | `mt5://log/{mode}` |
 
 ---
 
@@ -193,14 +181,14 @@ A typical LLM-driven iteration loop:
 
 ```
 1. env_info                                          → verify paths
-2. compile_and_deploy source="MyEA.mq5"              → 0 errors, .ex5 deployed ✅
+2. compile_and_deploy source="C:\\...\\MyEA.mq5"       → 0 errors, .ex5 deployed ✅
 3. patch_tester_ini config="tester.ini" updates={
      "Tester.Symbol": "EURUSD",
      "Tester.FromDate": "2025.01.01",
      "TesterInputs.RiskPct": "1.5"
    }
 4. run_backtest config="tester.ini" wait=true
-5. read_tester_report                                → summary.net_profit = 1234.56
+5. read_tester_report path=<report_path from step 4>  → summary.net_profit = 1234.56
                                                        summary.profit_factor = 1.45
 6. tail_log mode="tester" lines=200 structured=true  → diagnose journal warnings
 7. <edit Signal.mqh based on findings>

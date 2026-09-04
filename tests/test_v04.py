@@ -129,6 +129,5 @@ def test_write_smoke_tester_ini(tmp_path: Path):
 def test_resources_registered():
     """Verify FastMCP knows about the new resources."""
     # mcp instance keeps registered resources internally; ensure decorators ran without error
-    assert callable(server.livelog_resource)
-    assert callable(server.journal_resource)
-    assert callable(server.tester_log_resource)
+    assert callable(server.log_resource)
+    assert callable(server.report_resource)

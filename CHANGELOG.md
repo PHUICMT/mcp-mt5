@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.0 — 2026-09-04
+
+Protocol-quality release. The tool surface shrinks from 39 to 27 so the catalogue costs less
+context per call, and every tool now behaves the way MCP clients expect.
+
+### Changed (breaking)
+- **Consolidated tools** — see the "Renamed in 0.5.0" table in the README: `syntax_check` → `compile(syntax_only=true)`; `deploy_ea` + `install_include` → `deploy`; `extract_inputs`/`resolve_includes`/`extract_doc`/`find_symbol`/`find_magic_collision` → `inspect_source`; `lint_basic`/`check_deprecated`/`code_metrics` → `analyze_mql`; `format_check` → `format_mql` (dry run by default); `parse_optimization`/`top_passes` → `read_optimization`; `regression_check` → `compare_reports(guards=…)`; `list_backtests` → `get_backtest()`.
+- Resources `mt5://livelog`, `mt5://journal`, `mt5://tester-log` → template `mt5://log/{mode}`.
+- `read_tester_report` no longer inlines HTML by default (`raw_truncate=0`); the HTML is the `mt5://report/{id}` resource. `response_format="detailed"` returns trade rows.
+- Failures raise tool errors (`isError=true`) instead of returning `{"error": ...}`.
+
+### Added
+- Typed output (`outputSchema` / `structuredContent`) for every tool; `ToolAnnotations` (read-only / destructive hints) on every tool; per-parameter descriptions; server `instructions` describing the pipeline.
+- `run_backtest` is async and streams progress notifications while waiting.
+- Background runs: `start_backtest` (returns `run_id`), `get_backtest` (status, journal tail, report path/URI, or list all), `cancel_backtest`. Runs persist as JSON under `.mt5tmp/runs/`.
+- `mt5://report/{id}` and `mt5://report/latest` resources.
+- Protocol test suite (`tests/test_protocol.py`) driving the server through an in-process MCP client; CI runs a fast Linux lane plus the Windows matrix.
+
 ## 0.4.2 — 2026-09-04
 
 Bug-fix release. No new tools; several results that were silently wrong are now correct.

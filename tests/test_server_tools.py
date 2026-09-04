@@ -71,7 +71,7 @@ def test_run_backtest_missing_config(fake_layout):
 def test_deploy_ea_copies(fake_layout, tmp_path):
     src = tmp_path / "MyEA.ex5"
     src.write_bytes(b"BINARYDATA")
-    out = server.deploy_ea(str(src))
+    out = server.deploy(str(src))
     target = fake_layout.experts_dir / "MyEA.ex5"
     assert target.exists()
     assert target.read_bytes() == b"BINARYDATA"
@@ -81,7 +81,7 @@ def test_deploy_ea_copies(fake_layout, tmp_path):
 def test_install_include(fake_layout, tmp_path):
     src = tmp_path / "LiveLog.mqh"
     src.write_text("#define LIVELOG 1")
-    out = server.install_include(str(src))
+    out = server.deploy(str(src))
     assert (fake_layout.include_dir / "LiveLog.mqh").exists()
     assert "LiveLog.mqh" in out["copied_to"]
 
