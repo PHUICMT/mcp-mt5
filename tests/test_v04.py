@@ -119,7 +119,9 @@ def test_smoke_journal_scan(tmp_path: Path):
 def test_write_smoke_tester_ini(tmp_path: Path):
     cfg = tmp_path / "smoke.ini"
     write_smoke_tester_ini("MyEA", cfg, symbol="EURUSD", period="M15", days=2)
-    text = cfg.read_text(encoding="utf-8")
+    assert cfg.read_bytes()[:2] == b"\xff\xfe"           # UTF-16 LE BOM, like MT5's own ini files
+    from mcp_mt5.parsers import read_text_auto
+    text = read_text_auto(cfg)
     assert "Expert=MyEA" in text
     assert "Symbol=EURUSD" in text
     assert "ShutdownTerminal=1" in text

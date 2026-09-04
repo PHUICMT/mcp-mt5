@@ -74,7 +74,9 @@ Report=smoke_report
 
 [TesterInputs]
 """
-    target_path.write_text(body, encoding="utf-8")
+    # MT5 writes its own ini/set files as UTF-16 LE with BOM; writing the same avoids the
+    # "terminal silently ignores the ini" failure seen with script-generated UTF-8 files.
+    target_path.write_bytes(b"\xff\xfe" + body.replace("\n", "\r\n").encode("utf-16-le"))
     return target_path
 
 
