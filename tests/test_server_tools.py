@@ -65,7 +65,7 @@ def test_compile_invokes_metaeditor(fake_layout, tmp_path):
 
 def test_run_backtest_missing_config(fake_layout):
     with pytest.raises(ToolError, match="config not found"):
-        server.run_backtest("/no/cfg.ini")
+        server.start_backtest("/no/cfg.ini")
 
 
 def test_deploy_ea_copies(fake_layout, tmp_path):

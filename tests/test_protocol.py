@@ -13,7 +13,7 @@ from mcp_mt5.paths import MT5Layout
 
 pytestmark = pytest.mark.anyio
 
-EXPECTED_TOOL_COUNT = 35
+EXPECTED_TOOL_COUNT = 39
 
 
 @pytest.fixture
@@ -107,3 +107,34 @@ async def test_resources_listed_and_readable(session, fake_layout):
     (fake_layout.files_dir / "LiveLog.txt").write_text("hello\n", encoding="utf-8")
     read = await session.read_resource("mt5://livelog")
     assert "hello" in read.contents[0].text
+
+
+async def test_run_backtest_sends_progress_over_the_wire(session, fake_layout, tmp_path: Path, monkeypatch):
+    import subprocess
+
+    cfg = tmp_path / "t.ini"
+    cfg.write_text("[Tester]\nExpert=X\n", encoding="utf-8")
+
+    class FakeProc:
+        pid = 1
+
+        def __init__(self, cmd, **kw):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(subprocess, "Popen", FakeProc)
+    seen = []
+
+    async def on_progress(progress, total, message):
+        seen.append((progress, total, message))
+
+    r = await session.call_tool("run_backtest", {"config": str(cfg), "timeout_sec": 30}, progress_callback=on_progress)
+    assert r.isError is False
+    assert r.structuredContent["status"] == "completed"
+    assert seen and seen[0][2].startswith("terminal launched")
+    assert [s[0] for s in seen] == sorted(s[0] for s in seen)  # progress must not decrease

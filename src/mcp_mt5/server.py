@@ -6,9 +6,10 @@ import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, Awaitable, Callable, Optional
 
-from mcp.server.fastmcp import FastMCP
+import anyio
+from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import Field
@@ -32,6 +33,7 @@ from . import reports as _reports
 from . import snapshot as _snapshot
 from . import smoke as _smoke
 from . import ast_refactor as _ast_refactor
+from .runs import Run, registry as _runs
 
 _INSTRUCTIONS = """\
 MetaTrader 4/5 build-and-test harness. It drives MetaEditor64.exe and terminal64.exe on this
@@ -254,78 +256,167 @@ def compile(
     }
 
 
-@mcp.tool(annotations=_RUN)
-def run_backtest(
-    config: Annotated[str, Field(description='Absolute path to the tester.ini file.')],
-    wait: Annotated[bool, Field(description='true = block until the terminal exits (needs ShutdownTerminal=1); false = launch and return the pid.')] = True,
-    timeout_sec: Annotated[int, Field(description='Give up after this many seconds.')] = 1800,
-    portable: Annotated[bool, Field(description='Pass /portable so the terminal uses its install folder as data folder.')] = False,
-) -> dict[str, Any]:
-    """Run a Strategy Tester backtest headlessly from a tester.ini and wait for it to finish.
+def _finalize_run(L: MT5Layout, cfg: Path, portable: bool) -> "Callable[[Run], dict]":
+    """Build the callback that collects report path + journal notes once a terminal exits."""
+    def _collect(run: Run) -> dict:
+        start = run.started
+        latest_log = None
+        journal: dict = {"notes": {}, "warnings": []}
+        if L.tester_logs.exists():
+            logs = [p for p in L.tester_logs.glob("*.log") if p.stat().st_mtime >= start - 1]
+            logs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            if logs:
+                latest_log = str(logs[0])
+                try:
+                    journal = parse_tester_journal_notes(read_text_auto(logs[0]))
+                except Exception as e:  # pragma: no cover
+                    journal = {"notes": {}, "warnings": [f"journal parse failed: {e}"]}
+        expected = _report_path_from_ini(cfg, L, portable=portable)
+        report_path = None
+        if expected is not None and expected.exists() and expected.stat().st_mtime >= start - 1:
+            report_path = str(expected)
+        else:
+            fresh = _find_reports(L, since=start)
+            report_path = str(fresh[0]) if fresh else None
+        return {
+            "latest_tester_log": latest_log,
+            "expected_report": str(expected) if expected else None,
+            "report_path": report_path,
+            "journal_notes": journal["notes"],
+            "warnings": journal["warnings"],
+        }
+    return _collect
 
-    Requires the EA to be deployed first (`compile_and_deploy` / `deploy_ea`) and
-    `ShutdownTerminal=1` in the ini, otherwise the call blocks until `timeout_sec`.
-    Typically 1-30 minutes. Returns `report_path` (resolved from `Report=` in the ini),
-    `latest_tester_log`, and `journal_notes`/`warnings`; if `warnings` mentions
-    `start_time_changed` the tester silently moved FromDate because history was missing, so
-    the report is not comparable with other runs. Only one backtest per terminal at a time.
-    """
+
+def _run_view(run: Run, tail_lines: int = 0) -> dict[str, Any]:
+    view = {
+        "run_id": run.run_id,
+        "status": run.status,
+        "pid": run.pid,
+        "returncode": run.returncode,
+        "elapsed_sec": run.elapsed_sec,
+        "timeout_sec": run.timeout_sec,
+        "config": run.config,
+        "cmd": " ".join(run.cmd),
+        "error": run.error,
+    }
+    view.update(run.result)
+    if tail_lines and run.status == "running":
+        L = layout()
+        if L.tester_logs.exists():
+            logs = [p for p in L.tester_logs.glob("*.log") if p.stat().st_mtime >= run.started - 1]
+            if logs:
+                newest = max(logs, key=lambda p: p.stat().st_mtime)
+                view["latest_tester_log"] = str(newest)
+                view["log_tail"] = read_text_auto(newest).splitlines()[-tail_lines:]
+    return view
+
+
+def _start_run(config: str, portable: bool, timeout_sec: int) -> Run:
     L = layout()
     cfg = Path(config)
     if not cfg.exists():
         raise ToolError(f"config not found: {cfg}")
     if not L.terminal.exists():
         raise ToolError(f"terminal missing: {L.terminal}")
-
-    cmd = [str(L.terminal), f"/config:{cfg}"]
-    if portable:
-        cmd.append("/portable")
-
-    start = time.time()
-    rc: Optional[int] = None
-    pid: Optional[int] = None
     extra = ("/portable",) if portable else ()
-    if wait:
-        rc, pid = _smoke.run_terminal(L.terminal, cfg, timeout_sec, extra_args=extra)
-        if rc is None:
-            rc = -1
-    else:
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        pid = proc.pid
-        _spawned_pids.add(pid)
+    run = _runs.start(L.terminal, cfg, timeout_sec, extra, finalize=_finalize_run(L, cfg, portable))
+    if run.status == "failed":
+        raise ToolError(f"could not launch terminal: {run.error}")
+    return run
 
-    elapsed = round(time.time() - start, 2)
-    latest_log = None
-    journal: dict = {"notes": {}, "warnings": []}
-    if L.tester_logs.exists():
-        logs = [p for p in L.tester_logs.glob("*.log") if p.stat().st_mtime >= start - 1]
-        logs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        if logs:
-            latest_log = str(logs[0])
-            try:
-                journal = parse_tester_journal_notes(read_text_auto(logs[0]))
-            except Exception as e:  # pragma: no cover
-                journal = {"notes": {}, "warnings": [f"journal parse failed: {e}"]}
 
-    expected_report = _report_path_from_ini(cfg, L, portable=portable)
-    report_path = None
-    if expected_report is not None and expected_report.exists() and expected_report.stat().st_mtime >= start - 1:
-        report_path = str(expected_report)
-    elif wait:
-        fresh = _find_reports(L, since=start)
-        report_path = str(fresh[0]) if fresh else None
+async def run_backtest_impl(config: str, wait: bool = True, timeout_sec: int = 1800, portable: bool = False,
+                            progress: "Callable[[float, float, str], Awaitable[None]] | None" = None,
+                            poll_sec: float = 5.0) -> dict[str, Any]:
+    run = _start_run(config, portable, timeout_sec)
+    if progress:
+        await progress(0.0, float(timeout_sec), f"terminal launched (pid {run.pid}); waiting for ShutdownTerminal")
+    if not wait:
+        return _run_view(run)
+    while run.status == "running":
+        await anyio.sleep(poll_sec)
+        if progress and run.status == "running":
+            await progress(min(run.elapsed_sec, timeout_sec - 0.001), float(timeout_sec),
+                           f"backtest running for {int(run.elapsed_sec)} s")
+    if progress:
+        await progress(float(timeout_sec), float(timeout_sec), f"terminal exited ({run.status})")
+    view = _run_view(run)
+    if run.status == "timeout":
+        view["returncode"] = -1
+    return view
 
-    return {
-        "returncode": rc,
-        "pid": pid,
-        "elapsed_sec": elapsed,
-        "cmd": " ".join(cmd),
-        "latest_tester_log": latest_log,
-        "expected_report": str(expected_report) if expected_report else None,
-        "report_path": report_path,
-        "journal_notes": journal["notes"],
-        "warnings": journal["warnings"],
-    }
+
+@mcp.tool(annotations=_RUN)
+async def run_backtest(
+    config: Annotated[str, Field(description='Absolute path to the tester.ini file.')],
+    ctx: Context,
+    wait: Annotated[bool, Field(description='true = block until the terminal exits (needs ShutdownTerminal=1); false = launch and return a run_id for get_backtest.')] = True,
+    timeout_sec: Annotated[int, Field(description='Give up (and kill the terminal) after this many seconds.')] = 1800,
+    portable: Annotated[bool, Field(description='Pass /portable so the terminal uses its install folder as data folder.')] = False,
+) -> dict[str, Any]:
+    """Run a Strategy Tester backtest headlessly from a tester.ini and wait for it to finish.
+
+    Requires the EA to be deployed first (`compile_and_deploy` / `deploy_ea`) and
+    `ShutdownTerminal=1` in the ini, otherwise the call runs until `timeout_sec`.
+    Typically 1-30 minutes; progress notifications are sent every few seconds while waiting.
+    For long runs prefer `start_backtest` + `get_backtest`. Returns `run_id`, `report_path`
+    (resolved from `Report=` in the ini), `latest_tester_log` and `journal_notes`/`warnings`;
+    if `warnings` mentions `start_time_changed` the tester moved FromDate because history was
+    missing, so the report is not comparable with other runs.
+    """
+    async def _progress(p: float, total: float, message: str) -> None:
+        await ctx.report_progress(progress=p, total=total, message=message)
+
+    return await run_backtest_impl(config, wait=wait, timeout_sec=timeout_sec, portable=portable, progress=_progress)
+
+
+@mcp.tool(annotations=_RUN)
+def start_backtest(
+    config: Annotated[str, Field(description='Absolute path to the tester.ini file.')],
+    timeout_sec: Annotated[int, Field(description='Kill the terminal if it has not exited after this many seconds.')] = 1800,
+    portable: Annotated[bool, Field(description='Pass /portable so the terminal uses its install folder as data folder.')] = False,
+) -> dict[str, Any]:
+    """Launch a backtest in the background and return immediately with a `run_id`.
+
+    Poll `get_backtest(run_id)` until `status` is no longer "running"; the final record carries
+    `report_path` and `journal_notes`. Runs are also written to `.mt5tmp/runs/<run_id>.json`
+    next to the ini. Only one terminal per install can test at a time.
+    """
+    return _run_view(_start_run(config, portable, timeout_sec))
+
+
+@mcp.tool(annotations=_RO)
+def get_backtest(
+    run_id: Annotated[str, Field(description='Identifier returned by start_backtest / run_backtest.')],
+    tail_lines: Annotated[int, Field(description='While running, include this many trailing lines of the tester journal.')] = 20,
+) -> dict[str, Any]:
+    """Status of a background backtest: running / completed / timeout / cancelled, plus report path and journal notes when done."""
+    try:
+        run = _runs.get(run_id)
+    except KeyError:
+        raise ToolError(f"unknown run_id: {run_id} (see list_backtests)")
+    return _run_view(run, tail_lines=tail_lines)
+
+
+@mcp.tool(annotations=_DESTRUCTIVE)
+def cancel_backtest(
+    run_id: Annotated[str, Field(description='Identifier returned by start_backtest / run_backtest.')],
+) -> dict[str, Any]:
+    """Kill the terminal of a running background backtest. No report is produced for a cancelled run."""
+    try:
+        run = _runs.cancel(run_id)
+    except KeyError:
+        raise ToolError(f"unknown run_id: {run_id}")
+    return _run_view(run)
+
+
+@mcp.tool(annotations=_RO)
+def list_backtests() -> dict[str, Any]:
+    """List backtests started by this server process, newest first."""
+    runs = [_run_view(r) for r in _runs.list()]
+    return {"count": len(runs), "runs": runs}
+
 
 
 @mcp.tool(annotations=_DESTRUCTIVE)

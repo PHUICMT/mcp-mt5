@@ -255,6 +255,8 @@ def test_report_path_from_ini(fake_layout, tmp_path: Path):
 # --- #11 / #12 / #15 run_backtest & kill_terminal -------------------------------------
 
 def test_run_backtest_detaches_stdio_and_reports_journal(fake_layout, tmp_path: Path, monkeypatch):
+    import anyio
+
     cfg = tmp_path / "t.ini"
     cfg.write_text("[Tester]\nExpert=X\nReport=rep\n", encoding="utf-8")
     calls = {}
@@ -271,16 +273,63 @@ def test_run_backtest_detaches_stdio_and_reports_journal(fake_layout, tmp_path: 
             (fake_layout.data / "rep.htm").write_text(REPORT.format(p="7"), encoding="utf-8")
 
         def wait(self, timeout=None):
+            time.sleep(0.05)
+            return 0
+
+        def poll(self):
             return 0
 
     monkeypatch.setattr(subprocess, "Popen", FakeProc)
-    out = server.run_backtest(str(cfg))
+    progress = []
+
+    async def on_progress(p, total, msg):
+        progress.append((p, total, msg))
+
+    out = anyio.run(server.run_backtest_impl, str(cfg), True, 60, False, on_progress, 0.01)
     assert calls["kw"]["stdout"] is subprocess.DEVNULL and calls["kw"]["stderr"] is subprocess.DEVNULL
-    assert out["returncode"] == 0 and out["pid"] == 4242
+    assert out["status"] == "completed" and out["returncode"] == 0 and out["pid"] == 4242
     assert out["report_path"].endswith("rep.htm")
     assert out["journal_notes"]["start_time_changed"].startswith("2024.03.01")
     assert any("moved the start date" in w for w in out["warnings"])
     assert 4242 not in server._spawned_pids  # released after exit
+    assert len(progress) >= 2 and progress[-1][2].startswith("terminal exited")
+    assert server.get_backtest(out["run_id"])["status"] == "completed"
+    assert any(r["run_id"] == out["run_id"] for r in server.list_backtests()["runs"])
+
+
+def test_start_backtest_returns_immediately_and_can_be_cancelled(fake_layout, tmp_path: Path, monkeypatch):
+    import threading
+
+    cfg = tmp_path / "t.ini"
+    cfg.write_text("[Tester]\nExpert=X\n", encoding="utf-8")
+    killed = threading.Event()
+
+    class SlowProc:
+        pid = 777
+
+        def __init__(self, cmd, **kw):
+            self._done = threading.Event()
+
+        def wait(self, timeout=None):
+            if not self._done.wait(timeout):
+                raise subprocess.TimeoutExpired("x", timeout)
+            return -9
+
+        def poll(self):
+            return -9 if self._done.is_set() else None
+
+        def kill(self):
+            killed.set()
+            self._done.set()
+
+    monkeypatch.setattr(subprocess, "Popen", SlowProc)
+    out = server.start_backtest(str(cfg), timeout_sec=30)
+    assert out["status"] == "running" and 777 in server._spawned_pids
+    out = server.cancel_backtest(out["run_id"])
+    assert killed.wait(1.0)
+    time.sleep(0.1)
+    final = server.get_backtest(out["run_id"])
+    assert final["status"] == "cancelled" and 777 not in server._spawned_pids
 
 
 def test_kill_terminal_only_targets_spawned_pids(fake_layout):

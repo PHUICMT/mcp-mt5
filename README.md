@@ -27,7 +27,7 @@ For runtime trading, pair this with a live-trading MCP — they target different
 
 ## Tools
 
-The server exposes 35 tools and 3 MCP resources across nine categories.
+The server exposes 39 tools and 3 MCP resources across nine categories.
 
 ### 🔍 Discovery & terminal selection
 
@@ -88,7 +88,8 @@ The server exposes 35 tools and 3 MCP resources across nine categories.
 | Tool | Description |
 |------|-------------|
 | `patch_tester_ini` | Programmatically update keys in a `tester.ini` (e.g. `Tester.Symbol`, `Tester.FromDate`, `TesterInputs.RiskPct`) before running |
-| `run_backtest` | Launch `terminal64.exe /config:tester.ini`, optionally headless (when `ShutdownTerminal=1`), and return the latest tester log path |
+| `run_backtest` | Launch `terminal64.exe /config:tester.ini`, wait for `ShutdownTerminal=1`, stream progress notifications, and return `report_path`, tester log and journal notes (e.g. `start_time_changed`) |
+| `start_backtest` / `get_backtest` / `cancel_backtest` / `list_backtests` | Background runs: launch and return a `run_id` immediately, poll status and journal tail, kill, list. Runs persist to `.mt5tmp/runs/` |
 | `parse_optimization` | Best-effort parser for the latest `.opt` (optimization passes) binary file |
 | `top_passes` | Sort optimization passes by a chosen criterion and return the top *N* |
 | `read_tester_report` | Locate and parse the latest tester HTML report into a structured `summary` (net profit, profit factor, drawdown, trade counts, etc.) plus a sample of trade rows |
