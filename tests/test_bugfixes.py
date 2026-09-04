@@ -554,6 +554,7 @@ def test_check_deprecated_ignores_methods_and_mql5_bars_function(tmp_path: Path)
     assert found == [(4, "Bid"), (5, "Bars"), (6, "Ask"), (6, "OrderSend")]
 
 
+@pytest.mark.skipif(__import__("sys").platform == "win32", reason="the WSL /mnt scan only exists on Linux; path strings differ on Windows")
 def test_wsl_autodetect_scans_mnt_and_matches_windows_origin(tmp_path: Path, monkeypatch):
     from mcp_mt5 import paths
     mnt = tmp_path / "mnt"
