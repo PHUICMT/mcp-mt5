@@ -138,3 +138,23 @@ async def test_run_backtest_sends_progress_over_the_wire(session, fake_layout, t
     assert r.structuredContent["status"] == "completed"
     assert seen and seen[0][2].startswith("terminal launched")
     assert [s[0] for s in seen] == sorted(s[0] for s in seen)  # progress must not decrease
+
+
+async def test_report_is_exposed_as_resource_not_inline_html(session, fake_layout):
+    html = "<html><body><table><tr><td>Total Net Profit:</td><td>1 234.50</td></tr></table>" + "<p>" + "x" * 20000 + "</p></body></html>"
+    (fake_layout.data / "tester_report.htm").write_text(html, encoding="utf-8")
+    r = await session.call_tool("read_tester_report", {})
+    assert r.isError is False
+    sc = r.structuredContent
+    assert sc["summary"]["net_profit"] == "1 234.50"
+    assert "raw_truncated" not in sc and "trades" not in sc          # concise by default
+    assert sc["report_uri"].startswith("mt5://report/")
+    assert len(r.content[0].text) < 2000                              # the 20 KB HTML stayed out of the tool result
+    templates = {str(t.uriTemplate) for t in (await session.list_resource_templates()).resourceTemplates}
+    assert "mt5://report/{report_id}" in templates
+    read = await session.read_resource(sc["report_uri"])
+    assert "x" * 20000 in read.contents[0].text
+    latest = await session.read_resource("mt5://report/latest")
+    assert "1 234.50" in latest.contents[0].text
+    detailed = await session.call_tool("read_tester_report", {"response_format": "detailed", "raw_truncate": 100})
+    assert "trades" in detailed.structuredContent and len(detailed.structuredContent["raw_truncated"]) == 100

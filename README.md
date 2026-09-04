@@ -27,7 +27,7 @@ For runtime trading, pair this with a live-trading MCP — they target different
 
 ## Tools
 
-The server exposes 39 tools and 3 MCP resources across nine categories.
+The server exposes 39 tools and 4 MCP resources across nine categories.
 
 ### 🔍 Discovery & terminal selection
 
@@ -92,7 +92,7 @@ The server exposes 39 tools and 3 MCP resources across nine categories.
 | `start_backtest` / `get_backtest` / `cancel_backtest` / `list_backtests` | Background runs: launch and return a `run_id` immediately, poll status and journal tail, kill, list. Runs persist to `.mt5tmp/runs/` |
 | `parse_optimization` | Best-effort parser for the latest `.opt` (optimization passes) binary file |
 | `top_passes` | Sort optimization passes by a chosen criterion and return the top *N* |
-| `read_tester_report` | Locate and parse the latest tester HTML report into a structured `summary` (net profit, profit factor, drawdown, trade counts, etc.) plus a sample of trade rows |
+| `read_tester_report` | Parse an MT5/MT4 tester HTML report into a structured `summary` (~50 fields: net profit, profit factor, balance/equity drawdown, Sharpe, History Quality, trade counts…). `response_format="detailed"` adds every trade row; the raw HTML is served as the `mt5://report/{id}` resource instead of inline |
 | `compare_reports` | Diff two tester reports key-by-key with absolute and percent deltas |
 | `regression_check` | Verify a candidate report stays within guard thresholds vs a baseline (e.g. "net_profit may not drop more than 5%") |
 | `kill_terminal` | Kill terminals launched by this server (or every instance with `all_instances=true`) |
@@ -114,6 +114,7 @@ Live, re-readable URIs that an MCP client can poll instead of calling a tool rep
 | `mt5://livelog` | Latest tail of `MQL5/Files/LiveLog.txt` |
 | `mt5://journal` | Today's daily MT5 journal log |
 | `mt5://tester-log` | Most recent Strategy Tester journal |
+| `mt5://report/{id}` | Full HTML of a report returned by `read_tester_report` / `get_backtest` (`mt5://report/latest` = newest on disk) |
 
 ---
 

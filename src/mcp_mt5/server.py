@@ -1,12 +1,13 @@
 """MCP server wrapping MetaTrader 4/5 build pipeline (compile, deploy, backtest, logs)."""
 from __future__ import annotations
 
+import hashlib
 import shutil
 import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Any, Awaitable, Callable, Optional
+from typing import Annotated, Any, Awaitable, Callable, Literal, Optional
 
 import anyio
 from mcp.server.fastmcp import Context, FastMCP
@@ -146,6 +147,17 @@ def _find_reports(L: MT5Layout, since: Optional[float] = None) -> list[Path]:
     return unique
 
 
+# Reports handed out as MCP resources instead of inline HTML: id -> path.
+_report_ids: dict[str, Path] = {}
+
+
+def _register_report(p: Path) -> str:
+    """Return the `mt5://report/{id}` URI for a report file, registering it for `report_resource`."""
+    rid = hashlib.sha1(str(p.resolve()).encode("utf-8")).hexdigest()[:12]
+    _report_ids[rid] = p
+    return f"mt5://report/{rid}"
+
+
 @mcp.tool(annotations=_RO)
 def env_info() -> dict[str, Any]:
     """Resolve and report MT4/5 paths, terminal hash, and missing-component issues."""
@@ -282,6 +294,7 @@ def _finalize_run(L: MT5Layout, cfg: Path, portable: bool) -> "Callable[[Run], d
             "latest_tester_log": latest_log,
             "expected_report": str(expected) if expected else None,
             "report_path": report_path,
+            "report_uri": _register_report(Path(report_path)) if report_path else None,
             "journal_notes": journal["notes"],
             "warnings": journal["warnings"],
         }
@@ -553,15 +566,17 @@ def list_experts(
 @mcp.tool(annotations=_RO)
 def read_tester_report(
     path: Annotated[Optional[str], Field(description='Absolute path to a report .htm; defaults to the newest report found on disk.')] = None,
-    raw_truncate: Annotated[int, Field(description='Max characters of raw HTML to include (0 to omit).')] = 50000,
-    max_trades: Annotated[int, Field(description='Max trade rows to return in `trades`.')] = 500,
+    response_format: Annotated[Literal["concise", "detailed"], Field(description='"concise" = summary metrics + counts + report_uri; "detailed" adds the parsed trade rows.')] = "concise",
+    max_trades: Annotated[int, Field(description='Max trade rows to return in `trades` when response_format="detailed".')] = 500,
+    raw_truncate: Annotated[int, Field(description='Characters of raw HTML to inline (0 = none; read report_uri instead).')] = 0,
 ) -> dict[str, Any]:
-    """Parse a Strategy Tester HTML report (MT5 or MT4) into `summary` metrics and `trades` rows.
+    """Parse a Strategy Tester HTML report (MT5 or MT4) into `summary` metrics; the full HTML stays behind `report_uri`.
 
-    Prefer passing the `report_path` returned by `run_backtest`; without `path` the newest
-    report on disk is used, which may belong to an older run. `summary` values are the strings
-    printed in the report ("10 000.00", "359.61 (3.34%)"); use `compare_reports` /
-    `regression_check` for numeric comparison. Set `raw_truncate=0` unless you need the HTML.
+    Prefer passing the `report_path` returned by `run_backtest`/`get_backtest`; without `path`
+    the newest report on disk is used, which may belong to an older run. `summary` values are
+    the strings printed in the report ("10 000.00", "359.61 (3.34%)"); use `compare_reports` /
+    `regression_check` for numeric comparison. Read the `mt5://report/{id}` resource only when
+    you need the original HTML.
     """
     L = layout()
     if path:
@@ -576,15 +591,19 @@ def read_tester_report(
         raise ToolError(f"report not found: {p}")
     html = read_text_auto(p)
     parsed = parse_tester_report(html, max_trades=max_trades)
-    return {
+    out: dict[str, Any] = {
         "path": str(p),
+        "report_uri": _register_report(p),
         "size": len(html),
         "summary": parsed["summary"],
         "trade_rows_detected": parsed["trade_rows_detected"],
-        "trades_sample": parsed["trades_sample"],
-        "trades": parsed["trades"],
-        "raw_truncated": html[:raw_truncate],
     }
+    if response_format == "detailed":
+        out["trades"] = parsed["trades"]
+    if raw_truncate > 0:
+        out["raw_truncated"] = html[:raw_truncate]
+    return out
+
 
 
 @mcp.tool(annotations=_DESTRUCTIVE)
@@ -1102,6 +1121,20 @@ def extract_function(
 # ---------------------------------------------------------------------------
 # LiveLog resource (subscription-friendly)
 # ---------------------------------------------------------------------------
+
+@mcp.resource("mt5://report/{report_id}")
+def report_resource(report_id: str) -> str:
+    """Full HTML of a tester report referenced by `report_uri` from read_tester_report / get_backtest; "latest" = newest on disk."""
+    if report_id == "latest":
+        reports = _find_reports(layout())
+        if not reports:
+            return "(no tester reports found)"
+        return read_text_auto(reports[0])
+    p = _report_ids.get(report_id)
+    if p is None or not p.exists():
+        return f"(unknown or expired report id {report_id}; call read_tester_report again)"
+    return read_text_auto(p)
+
 
 @mcp.resource("mt5://livelog")
 def livelog_resource() -> str:
