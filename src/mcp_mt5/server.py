@@ -6,11 +6,12 @@ import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Annotated, Any, Optional
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
+from pydantic import Field
 
 from .paths import detect_layout, MT5Layout, list_terminal_origins, find_terminal_for_install
 from .parsers import (
@@ -175,21 +176,18 @@ def list_terminals() -> dict[str, Any]:
 
 @mcp.tool(annotations=_RUN)
 def compile(
-    source: str,
-    include: Optional[str] = None,
-    log_file: Optional[str] = None,
-    timeout_sec: int = 300,
+    source: Annotated[str, Field(description='Absolute Windows path to the .mq4/.mq5/.mqh source file.')],
+    include: Annotated[Optional[str], Field(description="MQL root folder (parent of Include/) if different from the active terminal's.")] = None,
+    log_file: Annotated[Optional[str], Field(description='Explicit path for the compile log; defaults to .mt5tmp/<stem>.compile.log next to the source.')] = None,
+    timeout_sec: Annotated[int, Field(description='Give up after this many seconds.')] = 300,
 ) -> dict[str, Any]:
-    """Compile a .mq4/.mq5/.mqh source via MetaEditor CLI.
+    """Compile one MQL source with MetaEditor and return structured diagnostics.
 
-    Args:
-        source: Absolute path to the source file.
-        include: Optional MQL root override (parent of `Include/`). Defaults to terminal MQL root.
-        log_file: Optional explicit log path. Defaults to `.mt5tmp/<stem>.compile.log` next to the source.
-        timeout_sec: Subprocess timeout.
-
-    Returns: returncode, structured `errors`/`warnings` lists, `result_errors`/`result_warnings`,
-             `log_path`, `log_excerpt` (last 80 lines), `cmd`.
+    `ok` is true only when the log has a `Result:` line with 0 errors AND a fresh .ex5/.ex4
+    was produced (`binary_fresh`). Fix every entry in `errors` (file, line, col, code, message)
+    and call again; warnings do not block deployment. Takes 1-30 s. For a faster check without
+    producing a binary use `syntax_check`; to also copy the binary into Experts/ use
+    `compile_and_deploy`.
     """
     L = layout()
     src = Path(source)
@@ -258,20 +256,19 @@ def compile(
 
 @mcp.tool(annotations=_RUN)
 def run_backtest(
-    config: str,
-    wait: bool = True,
-    timeout_sec: int = 1800,
-    portable: bool = False,
+    config: Annotated[str, Field(description='Absolute path to the tester.ini file.')],
+    wait: Annotated[bool, Field(description='true = block until the terminal exits (needs ShutdownTerminal=1); false = launch and return the pid.')] = True,
+    timeout_sec: Annotated[int, Field(description='Give up after this many seconds.')] = 1800,
+    portable: Annotated[bool, Field(description='Pass /portable so the terminal uses its install folder as data folder.')] = False,
 ) -> dict[str, Any]:
-    """Launch terminal with /config:<tester.ini>.
+    """Run a Strategy Tester backtest headlessly from a tester.ini and wait for it to finish.
 
-    Args:
-        config: Absolute path to tester.ini.
-        wait: Block until terminal exits (requires `ShutdownTerminal=1` in ini).
-        timeout_sec: Wait timeout.
-        portable: Pass /portable flag.
-
-    Returns: returncode, elapsed_sec, latest_tester_log path.
+    Requires the EA to be deployed first (`compile_and_deploy` / `deploy_ea`) and
+    `ShutdownTerminal=1` in the ini, otherwise the call blocks until `timeout_sec`.
+    Typically 1-30 minutes. Returns `report_path` (resolved from `Report=` in the ini),
+    `latest_tester_log`, and `journal_notes`/`warnings`; if `warnings` mentions
+    `start_time_changed` the tester silently moved FromDate because history was missing, so
+    the report is not comparable with other runs. Only one backtest per terminal at a time.
     """
     L = layout()
     cfg = Path(config)
@@ -332,7 +329,9 @@ def run_backtest(
 
 
 @mcp.tool(annotations=_DESTRUCTIVE)
-def kill_terminal(all_instances: bool = False) -> dict[str, Any]:
+def kill_terminal(
+    all_instances: Annotated[bool, Field(description='false = only terminals launched by this server; true = taskkill every terminal of this edition (may hit a live-trading terminal).')] = False,
+) -> dict[str, Any]:
     """Force-kill terminal processes launched by this server (run_backtest / smoke_test).
 
     By default only PIDs this server started are killed, so a live-trading terminal on the
@@ -359,15 +358,15 @@ def kill_terminal(all_instances: bool = False) -> dict[str, Any]:
 
 
 @mcp.tool(annotations=_RO)
-def tail_log(mode: str = "live", lines: int = 100, date: Optional[str] = None,
-             structured: bool = False) -> dict[str, Any]:
-    """Read last N lines from terminal logs.
+def tail_log(
+    mode: Annotated[str, Field(description='"live" = MQL5/Files/LiveLog.txt, "journal" = MQL5/Logs/YYYYMMDD.log, "tester" = newest Tester/logs file.')] = 'live',
+    lines: Annotated[int, Field(description='Number of lines from the end of the file.')] = 100,
+    date: Annotated[Optional[str], Field(description='Journal date as YYYYMMDD; defaults to today.')] = None,
+    structured: Annotated[bool, Field(description='Parse journal lines into {ts, source, message} records (journal/tester modes).')] = False,
+) -> dict[str, Any]:
+    """Tail a MetaTrader log: the EA's LiveLog.txt, the daily Experts journal, or the latest tester journal.
 
-    Args:
-        mode: "live" (Files/LiveLog.txt), "journal" (Logs/YYYYMMDD.log), "tester" (latest tester log).
-        lines: Tail line count.
-        date: Override YYYYMMDD for journal mode.
-        structured: Parse journal lines into ts/source/message records.
+    Use mode="tester" right after a backtest to see runtime errors and the effective test period.
     """
     L = layout()
     if mode == "live":
@@ -399,7 +398,10 @@ def tail_log(mode: str = "live", lines: int = 100, date: Optional[str] = None,
 
 
 @mcp.tool(annotations=_DESTRUCTIVE)
-def deploy_ea(source_ex: str, name: Optional[str] = None) -> dict[str, Any]:
+def deploy_ea(
+    source_ex: Annotated[str, Field(description='Absolute path to the compiled .ex4/.ex5 binary.')],
+    name: Annotated[Optional[str], Field(description="File name to use inside Experts/; defaults to the binary's own name.")] = None,
+) -> dict[str, Any]:
     """Copy compiled .ex4/.ex5 binary into Experts/.
 
     Args:
@@ -418,7 +420,10 @@ def deploy_ea(source_ex: str, name: Optional[str] = None) -> dict[str, Any]:
 
 
 @mcp.tool(annotations=_DESTRUCTIVE)
-def install_include(source: str, target_name: Optional[str] = None) -> dict[str, Any]:
+def install_include(
+    source: Annotated[str, Field(description='Absolute Windows path to the .mq4/.mq5/.mqh source file.')],
+    target_name: Annotated[Optional[str], Field(description="File name to use inside Include/; defaults to the source's own name.")] = None,
+) -> dict[str, Any]:
     """Copy a .mqh into the terminal Include folder (e.g. for LiveLog.mqh).
 
     Args:
@@ -436,7 +441,10 @@ def install_include(source: str, target_name: Optional[str] = None) -> dict[str,
 
 
 @mcp.tool(annotations=_RO)
-def list_experts(pattern: Optional[str] = None, recurse: bool = True) -> dict[str, Any]:
+def list_experts(
+    pattern: Annotated[Optional[str], Field(description='Glob pattern; defaults to *.ex5 on MT5 and *.ex4 on MT4.')] = None,
+    recurse: Annotated[bool, Field(description='Include subfolders of Experts/.')] = True,
+) -> dict[str, Any]:
     """List compiled EAs in Experts/ (defaults to *.ex5 for MT5, *.ex4 for MT4)."""
     L = layout()
     if not pattern:
@@ -452,15 +460,17 @@ def list_experts(pattern: Optional[str] = None, recurse: bool = True) -> dict[st
 
 
 @mcp.tool(annotations=_RO)
-def read_tester_report(path: Optional[str] = None, raw_truncate: int = 50000,
-                       max_trades: int = 500) -> dict[str, Any]:
-    """Locate and parse the latest MT5 tester HTML report.
+def read_tester_report(
+    path: Annotated[Optional[str], Field(description='Absolute path to a report .htm; defaults to the newest report found on disk.')] = None,
+    raw_truncate: Annotated[int, Field(description='Max characters of raw HTML to include (0 to omit).')] = 50000,
+    max_trades: Annotated[int, Field(description='Max trade rows to return in `trades`.')] = 500,
+) -> dict[str, Any]:
+    """Parse a Strategy Tester HTML report (MT5 or MT4) into `summary` metrics and `trades` rows.
 
-    Args:
-        path: Explicit report path. If omitted, the newest *.htm in the terminal data folder
-              root (where `Report=` is written), the install dir (/portable) and Tester/ is used.
-        raw_truncate: Max chars of raw HTML returned.
-        max_trades: Max trade rows returned in `trades` (all rows are parsed).
+    Prefer passing the `report_path` returned by `run_backtest`; without `path` the newest
+    report on disk is used, which may belong to an older run. `summary` values are the strings
+    printed in the report ("10 000.00", "359.61 (3.34%)"); use `compare_reports` /
+    `regression_check` for numeric comparison. Set `raw_truncate=0` unless you need the HTML.
     """
     L = layout()
     if path:
@@ -487,14 +497,17 @@ def read_tester_report(path: Optional[str] = None, raw_truncate: int = 50000,
 
 
 @mcp.tool(annotations=_DESTRUCTIVE)
-def patch_tester_ini(config: str, updates: dict) -> dict[str, Any]:
-    """Update fields in a tester.ini file in-place.
+def patch_tester_ini(
+    config: Annotated[str, Field(description='Absolute path to the tester.ini file.')],
+    updates: Annotated[dict, Field(description='Mapping of "Section.Key" to new value, e.g. {"Tester.Symbol": "EURUSD"}.')],
+) -> dict[str, Any]:
+    """Set keys in a tester.ini in place, keeping the file's encoding and other lines.
 
-    Args:
-        config: Path to tester.ini.
-        updates: Mapping of `Section.Key` → value (e.g. {"Tester.Symbol": "EURUSD", "Tester.FromDate": "2025.01.01"}).
-
-    Returns dict listing applied + skipped keys.
+    `updates` maps "Section.Key" to a value, e.g. {"Tester.Symbol": "EURUSD",
+    "Tester.FromDate": "2025.01.01", "TesterInputs.RiskPct": "1.5"}. Missing sections/keys are
+    added. Run `validate_tester_ini` afterwards; always set Deposit, Currency, Leverage, Model,
+    Optimization, Visual, UseLocal/UseRemote/UseCloud and Report explicitly so a run does not
+    inherit the machine's last UI state.
     """
     p = Path(config)
     if not p.exists():
@@ -559,8 +572,15 @@ def patch_tester_ini(config: str, updates: dict) -> dict[str, Any]:
 
 
 @mcp.tool(annotations=_DESTRUCTIVE)
-def compile_and_deploy(source: str, ea_name: Optional[str] = None) -> dict[str, Any]:
-    """Compile then deploy resulting .ex5/.ex4 to Experts/ in one shot."""
+def compile_and_deploy(
+    source: Annotated[str, Field(description='Absolute Windows path to the .mq4/.mq5/.mqh source file.')],
+    ea_name: Annotated[Optional[str], Field(description='File name for the binary inside Experts/; defaults to <stem>.ex5.')] = None,
+) -> dict[str, Any]:
+    """Compile a source and, if it succeeds, copy the fresh binary into the terminal's Experts/ folder.
+
+    Use this before `run_backtest` or `smoke_test`. Returns the `compile` result plus `deploy`;
+    `ok` is false if either stage failed (compile errors are in `compile.errors`).
+    """
     res = compile(source)
     if not res.get("ok"):
         return {"compile": res, "deploy": None, "ok": False}
@@ -580,13 +600,18 @@ def compile_and_deploy(source: str, ea_name: Optional[str] = None) -> dict[str, 
 # ---------------------------------------------------------------------------
 
 @mcp.tool(annotations=_RO)
-def extract_inputs(source: str) -> dict[str, Any]:
+def extract_inputs(
+    source: Annotated[str, Field(description='Absolute Windows path to the .mq4/.mq5/.mqh source file.')],
+) -> dict[str, Any]:
     """Parse `input <type> <name> = <default>;` declarations from a source file."""
     return {"file": source, "inputs": _analysis.extract_inputs(source)}
 
 
 @mcp.tool(annotations=_DESTRUCTIVE)
-def gen_tester_inputs(source: str, write_to: Optional[str] = None) -> dict[str, Any]:
+def gen_tester_inputs(
+    source: Annotated[str, Field(description='Absolute Windows path to the .mq4/.mq5/.mqh source file.')],
+    write_to: Annotated[Optional[str], Field(description='Optional tester.ini path; when given the [TesterInputs] block is written into it.')] = None,
+) -> dict[str, Any]:
     """Generate a `[TesterInputs]` block from EA inputs.
 
     If `write_to` points at a tester.ini, the block is appended/replaced in-place.
@@ -607,15 +632,22 @@ def gen_tester_inputs(source: str, write_to: Optional[str] = None) -> dict[str, 
 
 
 @mcp.tool(annotations=_RO)
-def resolve_includes(source: str, mql_root: Optional[str] = None) -> dict[str, Any]:
+def resolve_includes(
+    source: Annotated[str, Field(description='Absolute Windows path to the .mq4/.mq5/.mqh source file.')],
+    mql_root: Annotated[Optional[str], Field(description="MQL root used to resolve <angle> includes; defaults to the active terminal's.")] = None,
+) -> dict[str, Any]:
     """Recursively resolve `#include` directives. Reports unresolved files."""
     L = layout()
     return _analysis.resolve_includes(source, mql_root or str(L.mql_root))
 
 
 @mcp.tool(annotations=_RO)
-def find_symbol(symbol: str, root: str, exts: Optional[list[str]] = None,
-                limit: int = 200) -> dict[str, Any]:
+def find_symbol(
+    symbol: Annotated[str, Field(description='Identifier to search for (whole-word, comments and strings ignored).')],
+    root: Annotated[str, Field(description='Absolute path to the project folder to scan recursively for MQL files.')],
+    exts: Annotated[Optional[list[str]], Field(description='File extensions to search; defaults to .mq4, .mq5, .mqh.')] = None,
+    limit: Annotated[int, Field(description='Stop after this many matches.')] = 200,
+) -> dict[str, Any]:
     """Grep a symbol across MQL files, skipping comments and string literals."""
     matches = _analysis.find_symbol(
         symbol, root,
@@ -626,7 +658,10 @@ def find_symbol(symbol: str, root: str, exts: Optional[list[str]] = None,
 
 
 @mcp.tool(annotations=_RO)
-def code_metrics(source: Optional[str] = None, root: Optional[str] = None) -> dict[str, Any]:
+def code_metrics(
+    source: Annotated[Optional[str], Field(description='Absolute path of one source file to measure (use `root` for a whole tree).')] = None,
+    root: Annotated[Optional[str], Field(description='Absolute path of a folder to measure every MQL file under (alternative to `source`).')] = None,
+) -> dict[str, Any]:
     """Compute LOC/function/nesting metrics for a file or every MQL file under a root."""
     if source:
         return _raise_if_error(_analysis.code_metrics(source))
@@ -636,13 +671,18 @@ def code_metrics(source: Optional[str] = None, root: Optional[str] = None) -> di
 
 
 @mcp.tool(annotations=_RO)
-def extract_doc(source: str) -> dict[str, Any]:
+def extract_doc(
+    source: Annotated[str, Field(description='Absolute Windows path to the .mq4/.mq5/.mqh source file.')],
+) -> dict[str, Any]:
     """Extract MetaEditor `//+--+ //| ... +--+` doc blocks from a source file."""
     return {"file": source, "blocks": _analysis.extract_doc(source)}
 
 
 @mcp.tool(annotations=_RO)
-def find_magic_collision(root: str, var_pattern: str = "Magic") -> dict[str, Any]:
+def find_magic_collision(
+    root: Annotated[str, Field(description='Absolute path to the project folder to scan recursively for MQL files.')],
+    var_pattern: Annotated[str, Field(description='Substring identifying magic-number variables, e.g. Magic.')] = 'Magic',
+) -> dict[str, Any]:
     """Find duplicate magic-number assignments across the project."""
     return _analysis.find_magic_collision(root, var_pattern=var_pattern)
 
@@ -652,7 +692,10 @@ def find_magic_collision(root: str, var_pattern: str = "Magic") -> dict[str, Any
 # ---------------------------------------------------------------------------
 
 @mcp.tool(annotations=_RUN)
-def syntax_check(source: str, timeout_sec: int = 60) -> dict[str, Any]:
+def syntax_check(
+    source: Annotated[str, Field(description='Absolute Windows path to the .mq4/.mq5/.mqh source file.')],
+    timeout_sec: Annotated[int, Field(description='Give up after this many seconds.')] = 60,
+) -> dict[str, Any]:
     """Compile a source via MetaEditor's syntax-only mode (`/s`) and return diagnostics."""
     L = layout()
     src = Path(source)
@@ -686,19 +729,26 @@ def syntax_check(source: str, timeout_sec: int = 60) -> dict[str, Any]:
 
 
 @mcp.tool(annotations=_RO)
-def lint_basic(source: str) -> dict[str, Any]:
+def lint_basic(
+    source: Annotated[str, Field(description='Absolute Windows path to the .mq4/.mq5/.mqh source file.')],
+) -> dict[str, Any]:
     """Run structural lint rules (missing handlers, unused inputs, hardcoded magic/symbol)."""
     return _raise_if_error(_lint.lint_basic(source))
 
 
 @mcp.tool(annotations=_RO)
-def check_deprecated(source: str) -> dict[str, Any]:
+def check_deprecated(
+    source: Annotated[str, Field(description='Absolute Windows path to the .mq4/.mq5/.mqh source file.')],
+) -> dict[str, Any]:
     """Flag MT4-style deprecated API calls in MT5 source."""
     return {"file": source, "findings": _lint.check_deprecated(source)}
 
 
 @mcp.tool(annotations=_RO)
-def validate_tester_ini(config: str, source: Optional[str] = None) -> dict[str, Any]:
+def validate_tester_ini(
+    config: Annotated[str, Field(description='Absolute path to the tester.ini file.')],
+    source: Annotated[Optional[str], Field(description='Optional EA source; when given, [TesterInputs] keys are cross-checked against its input declarations.')] = None,
+) -> dict[str, Any]:
     """Sanity-check a tester.ini. If `source` given, cross-check inputs vs EA declarations."""
     return _raise_if_error(_lint.validate_tester_ini(config, source=source))
 
@@ -708,13 +758,20 @@ def validate_tester_ini(config: str, source: Optional[str] = None) -> dict[str, 
 # ---------------------------------------------------------------------------
 
 @mcp.tool(annotations=_DESTRUCTIVE)
-def format_mql(source: str, style: Optional[str] = None, write: bool = True) -> dict[str, Any]:
+def format_mql(
+    source: Annotated[str, Field(description='Absolute Windows path to the .mq4/.mq5/.mqh source file.')],
+    style: Annotated[Optional[str], Field(description='clang-format style string; defaults to an MQL-friendly LLVM-based profile.')] = None,
+    write: Annotated[bool, Field(description='false = report/diff only (default); true = overwrite the file in its original encoding.')] = True,
+) -> dict[str, Any]:
     """Format an MQL file via clang-format (treats source as C++)."""
     return _raise_if_error(_formatting.format_mql(source, style=style, write=write))
 
 
 @mcp.tool(annotations=_RO)
-def format_check(source: str, style: Optional[str] = None) -> dict[str, Any]:
+def format_check(
+    source: Annotated[str, Field(description='Absolute Windows path to the .mq4/.mq5/.mqh source file.')],
+    style: Annotated[Optional[str], Field(description='clang-format style string; defaults to an MQL-friendly LLVM-based profile.')] = None,
+) -> dict[str, Any]:
     """Report whether a file needs formatting without writing it."""
     return _raise_if_error(_formatting.format_check(source, style=style))
 
@@ -724,7 +781,12 @@ def format_check(source: str, style: Optional[str] = None) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 @mcp.tool(annotations=_DESTRUCTIVE)
-def rename_symbol(old: str, new: str, root: str, dry_run: bool = True) -> dict[str, Any]:
+def rename_symbol(
+    old: Annotated[str, Field(description='Identifier to rename (whole-word match).')],
+    new: Annotated[str, Field(description='New identifier.')],
+    root: Annotated[str, Field(description='Absolute path to the project folder to scan recursively for MQL files.')],
+    dry_run: Annotated[bool, Field(description='true = preview the change and write nothing; false = apply it to the files.')] = True,
+) -> dict[str, Any]:
     """Rename a symbol across MQL files (whole-word match). `dry_run=True` previews only."""
     return _raise_if_error(_refactor.rename_symbol(old, new, root, dry_run=dry_run))
 
@@ -746,9 +808,13 @@ def _load_opt(path: Optional[str], expert: Optional[str], symbol: Optional[str],
 
 
 @mcp.tool(annotations=_RO)
-def parse_optimization(path: Optional[str] = None, expert: Optional[str] = None,
-                       symbol: Optional[str] = None, period: Optional[str] = None,
-                       sample: int = 50) -> dict[str, Any]:
+def parse_optimization(
+    path: Annotated[Optional[str], Field(description='Absolute path to a Tester/cache/*.opt file; defaults to the newest matching cache.')] = None,
+    expert: Annotated[Optional[str], Field(description='Expert name (file stem) used to select the matching cache file.')] = None,
+    symbol: Annotated[Optional[str], Field(description='Symbol name as shown in Market Watch, e.g. EURUSD.')] = None,
+    period: Annotated[Optional[str], Field(description='Timeframe code such as M15, H1, D1.')] = None,
+    sample: Annotated[int, Field(description='How many passes to include in `passes_sample`.')] = 50,
+) -> dict[str, Any]:
     """Parse an MT5 `.opt` optimisation cache (header, inputs, pass count, first `sample` passes).
 
     Without `path`, the newest cache under Tester/ is used; pass `expert`/`symbol`/`period`
@@ -763,9 +829,15 @@ def parse_optimization(path: Optional[str] = None, expert: Optional[str] = None,
 
 
 @mcp.tool(annotations=_RO)
-def top_passes(opt_path: Optional[str] = None, criterion: str = "profit",
-               n: int = 10, descending: bool = True, expert: Optional[str] = None,
-               symbol: Optional[str] = None, period: Optional[str] = None) -> dict[str, Any]:
+def top_passes(
+    opt_path: Annotated[Optional[str], Field(description='Absolute path to a Tester/cache/*.opt file; defaults to the newest matching cache.')] = None,
+    criterion: Annotated[str, Field(description='Pass field to rank by: profit, profit_factor, expected_payoff, recovery_factor, sharpe_ratio, maxdrawdown, trades, custom_fitness.')] = 'profit',
+    n: Annotated[int, Field(description='How many passes to return.')] = 10,
+    descending: Annotated[bool, Field(description='true = highest first; use false for drawdown-style metrics.')] = True,
+    expert: Annotated[Optional[str], Field(description='Expert name (file stem) used to select the matching cache file.')] = None,
+    symbol: Annotated[Optional[str], Field(description='Symbol name as shown in Market Watch, e.g. EURUSD.')] = None,
+    period: Annotated[Optional[str], Field(description='Timeframe code such as M15, H1, D1.')] = None,
+) -> dict[str, Any]:
     """Sort *all* optimization passes by criterion and return the top N."""
     parsed = _load_opt(opt_path, expert, symbol, period)
     passes = parsed.get("passes") or []
@@ -785,14 +857,26 @@ def top_passes(opt_path: Optional[str] = None, criterion: str = "profit",
 # ---------------------------------------------------------------------------
 
 @mcp.tool(annotations=_RO)
-def compare_reports(baseline: str, candidate: str) -> dict[str, Any]:
+def compare_reports(
+    baseline: Annotated[str, Field(description='Absolute path to the baseline tester report (.htm).')],
+    candidate: Annotated[str, Field(description='Absolute path to the candidate tester report (.htm) to compare against the baseline.')],
+) -> dict[str, Any]:
     """Diff two MT5 tester HTML reports key-by-key with absolute and percent deltas."""
     return _raise_if_error(_reports.compare_reports(baseline, candidate))
 
 
 @mcp.tool(annotations=_RO)
-def regression_check(baseline: str, candidate: str, guards: Optional[dict] = None) -> dict[str, Any]:
-    """Verify candidate report stays within guard thresholds vs baseline."""
+def regression_check(
+    baseline: Annotated[str, Field(description='Absolute path to the baseline tester report (.htm).')],
+    candidate: Annotated[str, Field(description='Absolute path to the candidate tester report (.htm) to compare against the baseline.')],
+    guards: Annotated[Optional[dict], Field(description='Percent thresholds per summary key, e.g. {"net_profit": -5, "profit_factor": -10, "max_drawdown": 25}.')] = None,
+) -> dict[str, Any]:
+    """Check a candidate report against a baseline using percentage guards, e.g. {"net_profit": -5}.
+
+    Reports "regression" when a profit-style metric drops below the guard or a drawdown/loss
+    metric rises above it. Note: accepting only improvements across many iterations is a form
+    of selection bias; treat this as a sanity gate, not proof of robustness.
+    """
     return _raise_if_error(_reports.regression_check(baseline, candidate, guards=guards))
 
 
@@ -801,13 +885,19 @@ def regression_check(baseline: str, candidate: str, guards: Optional[dict] = Non
 # ---------------------------------------------------------------------------
 
 @mcp.tool(annotations=_WRITE)
-def snapshot_sources(sources: list[str], dest: str, label: Optional[str] = None) -> dict[str, Any]:
+def snapshot_sources(
+    sources: Annotated[list[str], Field(description='Absolute paths of the source files to freeze.')],
+    dest: Annotated[str, Field(description='Absolute path to the folder that holds snapshots.')],
+    label: Annotated[Optional[str], Field(description='Folder name for this snapshot; defaults to a timestamp.')] = None,
+) -> dict[str, Any]:
     """Freeze a copy of source files into a timestamped folder under `dest`."""
     return _snapshot.snapshot_sources(sources, dest, label=label)
 
 
 @mcp.tool(annotations=_RO)
-def list_snapshots(dest: str) -> dict[str, Any]:
+def list_snapshots(
+    dest: Annotated[str, Field(description='Absolute path to the folder that holds snapshots.')],
+) -> dict[str, Any]:
     """List all snapshot folders under `dest`."""
     return {"snapshots": _snapshot.list_snapshots(dest)}
 
@@ -817,8 +907,12 @@ def list_snapshots(dest: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 @mcp.tool(annotations=_RUN)
-def select_terminal(origin: Optional[str] = None, hash: Optional[str] = None,
-                    install: Optional[str] = None, edition: str = "mt5") -> dict[str, Any]:
+def select_terminal(
+    origin: Annotated[Optional[str], Field(description="Install path stored in the terminal's origin.txt, e.g. C:\\\\Program Files\\\\MetaTrader 5.")] = None,
+    hash: Annotated[Optional[str], Field(description='32-character terminal data folder name under %APPDATA%\\\\MetaQuotes\\\\Terminal.')] = None,
+    install: Annotated[Optional[str], Field(description='Install folder containing terminal64.exe; its data folder is found by scanning origin.txt files.')] = None,
+    edition: Annotated[str, Field(description='"mt5" or "mt4".')] = 'mt5',
+) -> dict[str, Any]:
     """Switch the active terminal data folder for this session.
 
     Provide one of: `origin` (install path stored in origin.txt), `hash` (32-char
@@ -864,12 +958,19 @@ def select_terminal(origin: Optional[str] = None, hash: Optional[str] = None,
 # ---------------------------------------------------------------------------
 
 @mcp.tool(annotations=_DESTRUCTIVE)
-def smoke_test(source: str, expert_name: Optional[str] = None,
-               symbol: str = "EURUSD", period: str = "M15", days: int = 1,
-               timeout_sec: int = 600) -> dict[str, Any]:
-    """Compile, deploy, run a 1-day headless backtest, and scan the journal for runtime errors.
+def smoke_test(
+    source: Annotated[str, Field(description='Absolute Windows path to the .mq4/.mq5/.mqh source file.')],
+    expert_name: Annotated[Optional[str], Field(description="Name to use in Expert= of the generated ini; defaults to the binary's stem.")] = None,
+    symbol: Annotated[str, Field(description='Symbol name as shown in Market Watch, e.g. EURUSD.')] = 'EURUSD',
+    period: Annotated[str, Field(description='Timeframe code such as M15, H1, D1.')] = 'M15',
+    days: Annotated[int, Field(description='Length of the backtest window in days (ends 2 days ago).')] = 1,
+    timeout_sec: Annotated[int, Field(description='Give up after this many seconds.')] = 600,
+) -> dict[str, Any]:
+    """One-call health check for an EA: compile, deploy, run a 1-day headless backtest, scan the journal.
 
-    Returns `ok: true` only if compilation, deployment, run, and the journal scan all pass.
+    Catches problems that compile cleanly but fail at runtime (OnInit errors, array out of range,
+    divide by zero). `ok` is true only if every stage passes; `stage` tells where it stopped.
+    Overwrites the EA of the same name in Experts/. Takes 1-10 minutes.
     """
     return _smoke.run_smoke(
         layout(),
@@ -887,9 +988,15 @@ def smoke_test(source: str, expert_name: Optional[str] = None,
 # ---------------------------------------------------------------------------
 
 @mcp.tool(annotations=_DESTRUCTIVE)
-def extract_function(source: str, line_start: int, line_end: int, new_name: str,
-                     return_type: str = "void", target_file: Optional[str] = None,
-                     dry_run: bool = True) -> dict[str, Any]:
+def extract_function(
+    source: Annotated[str, Field(description='Absolute Windows path to the .mq4/.mq5/.mqh source file.')],
+    line_start: Annotated[int, Field(description='First line (1-based, inclusive) of the block to extract.')],
+    line_end: Annotated[int, Field(description='Last line (1-based, inclusive) of the block to extract.')],
+    new_name: Annotated[str, Field(description='Name of the new helper function.')],
+    return_type: Annotated[str, Field(description='Return type of the helper, e.g. void or double.')] = 'void',
+    target_file: Annotated[Optional[str], Field(description='Optional .mqh path to append the helper to; defaults to inserting above the enclosing function.')] = None,
+    dry_run: Annotated[bool, Field(description='true = preview the change and write nothing; false = apply it to the files.')] = True,
+) -> dict[str, Any]:
     """Extract a contiguous block of lines into a new helper function.
 
     Brace-counting + regex param detection — not a full AST parser. Returns the

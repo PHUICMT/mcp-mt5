@@ -62,6 +62,8 @@ async def test_tool_catalogue_is_agent_ready(session):
         assert t.annotations is not None, f"{t.name}: no annotations"
         assert t.annotations.readOnlyHint is not None and t.annotations.destructiveHint is not None
         assert t.annotations.openWorldHint is False
+        for prop, spec in t.inputSchema.get("properties", {}).items():
+            assert spec.get("description"), f"{t.name}.{prop} has no description"
 
 
 async def test_read_only_and_destructive_hints_are_consistent(session):
